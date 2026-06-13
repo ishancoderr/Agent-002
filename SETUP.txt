@@ -1,0 +1,233 @@
+====================================================
+  AGENT 2 — SETUP AND RUN GUIDE  (Windows)
+====================================================
+
+
+PREREQUISITES
+----------------------------------------------------
+  - Python 3.10+
+  - PostgreSQL 14+ with PostGIS extension enabled
+  - Git (required to install kqml-messaging from GitHub)
+  - An OpenAI API key (for GPT-4o mini NL query parsing)
+  - Agent 1 running on http://localhost:8000 (peer agent)
+
+
+----------------------------------------------------
+STEP 1 — CREATE VIRTUAL ENVIRONMENT
+----------------------------------------------------
+Open PowerShell inside D:\Agent-002 and run:
+
+    python -m venv venv
+
+This creates a folder called venv\ inside D:\Agent-002.
+
+
+----------------------------------------------------
+STEP 2 — ACTIVATE VIRTUAL ENVIRONMENT
+----------------------------------------------------
+Run this every time you open a new terminal:
+
+    venv\Scripts\activate
+
+You will see (venv) appear at the start of the line:
+
+    (venv) PS D:\Agent-002>
+
+To deactivate (when done):
+
+    deactivate
+
+NOTE: If activation is blocked by an execution policy,
+run this once in PowerShell as Administrator:
+
+    Set-ExecutionPolicy RemoteSigned
+
+
+----------------------------------------------------
+STEP 3 — INSTALL DEPENDENCIES
+----------------------------------------------------
+Make sure venv is activated, then run:
+
+    pip install -r requirements.txt
+
+This installs everything including the kqml-messaging
+package directly from GitHub. Git must be on your PATH.
+
+To verify installation:
+
+    pip list
+
+
+----------------------------------------------------
+STEP 4 — SET UP THE DATABASE
+----------------------------------------------------
+Open psql or pgAdmin and run:
+
+    CREATE DATABASE agent_2_db;
+    \c agent_2_db
+    CREATE EXTENSION IF NOT EXISTS postgis;
+
+Then create the required tables:
+
+    CREATE TABLE states (
+        state_id   SERIAL PRIMARY KEY,
+        state_name VARCHAR(100) NOT NULL UNIQUE,
+        geo_shape  GEOMETRY(MULTIPOLYGON, 4326)
+    );
+
+    CREATE TABLE cities (
+        city_name VARCHAR(100) PRIMARY KEY,
+        centroid  GEOMETRY(POINT, 4326)
+    );
+
+    CREATE TABLE state_demographics (
+        id          SERIAL PRIMARY KEY,
+        state_id    INTEGER REFERENCES states(state_id),
+        stat_year   INTEGER NOT NULL,
+        population  BIGINT,
+        marriages   INTEGER,
+        live_births INTEGER
+    );
+
+Load Agent 2's partition of the German geospatial dataset
+into these tables. Agent 2 holds the complementary subset
+of states to Agent 1 (roughly 8 of the 16 federal states).
+
+
+----------------------------------------------------
+STEP 5 — CONFIGURE .env FILE
+----------------------------------------------------
+Open agent2\.env and make sure these values are set:
+
+    DB_HOST=localhost
+    DB_PORT=5433
+    DB_USER=postgres
+    DB_PASS=your_postgres_password
+    DB_NAME=agent_2_db
+
+    AGENT1_URL=http://localhost:8000
+
+    OPENAI_API_KEY=sk-proj-...
+
+Save the file after editing.
+
+
+----------------------------------------------------
+STEP 6 — RUN AGENT 2
+----------------------------------------------------
+Make sure venv is activated, then run:
+
+    python -m uvicorn agent2.main:app --port 8001 --reload
+
+You should see output like:
+
+    INFO:     Uvicorn running on http://127.0.0.1:8001
+    INFO:     Application startup complete.
+
+Agent 2 is now running on port 8001.
+
+NOTE: Use "python -m uvicorn" rather than "uvicorn"
+directly if uvicorn is not on your system PATH.
+
+
+----------------------------------------------------
+STEP 7 — TEST IT
+----------------------------------------------------
+Health check (should return Agent-2 status):
+
+    curl http://localhost:8001/health
+
+Submit a natural-language query:
+
+    curl -X POST http://localhost:8001/query `
+      -H "Content-Type: application/json" `
+      -d '{"query": "Give me population data for Berlin from 2020 to 2022"}'
+
+Interactive API docs (Swagger UI):
+
+    http://localhost:8001/docs
+
+
+----------------------------------------------------
+RUNNING BOTH AGENTS TOGETHER
+----------------------------------------------------
+Open two PowerShell windows:
+
+  Terminal 1 — Agent 1 (D:\Agent-001):
+      venv\Scripts\activate
+      python -m uvicorn agent1.main:app --port 8000 --reload
+
+  Terminal 2 — Agent 2 (D:\Agent-002):
+      venv\Scripts\activate
+      python -m uvicorn agent2.main:app --port 8001 --reload
+
+Queries sent to either agent will automatically trigger
+KQML communication with the peer when local data is
+incomplete.
+
+
+----------------------------------------------------
+API ENDPOINTS
+----------------------------------------------------
+  POST  /query          Natural-language geospatial query
+  POST  /kqml/receive   Receive KQML ask from Agent 1
+  GET   /health         Liveness probe
+
+  Swagger UI : http://127.0.0.1:8001/docs
+  ReDoc      : http://127.0.0.1:8001/redoc
+
+
+----------------------------------------------------
+QUICK REFERENCE — DAILY USE
+----------------------------------------------------
+Every time you want to run Agent 2:
+
+    1.  Open PowerShell in D:\Agent-002
+    2.  venv\Scripts\activate
+    3.  python -m uvicorn agent2.main:app --port 8001 --reload
+
+
+----------------------------------------------------
+TROUBLESHOOTING
+----------------------------------------------------
+
+Problem : 'python' is not recognized
+Fix     : Install Python 3.10+ from python.org
+          Check "Add Python to PATH" during install.
+
+Problem : venv\Scripts\activate blocked by execution policy
+Fix     : Run once in PowerShell as Administrator:
+              Set-ExecutionPolicy RemoteSigned
+          Then try activate again.
+
+Problem : pip install fails on kqml-messaging
+Fix     : Make sure Git is installed and on PATH.
+              git --version
+          The package is pulled from GitHub during install.
+
+Problem : Parse error / 'OPENAI_API_KEY' not found
+Fix     : The .env file is missing or the key has a
+          trailing space. Open agent2\.env and check
+          OPENAI_API_KEY has no extra spaces.
+
+Problem : password authentication failed for postgres
+Fix     : Check DB_PASS in agent2\.env matches your
+          PostgreSQL password.
+
+Problem : connection refused on port 5433
+Fix     : Confirm PostgreSQL is running:
+              pg_isready -h localhost -p 5433
+          Check DB_PORT in agent2\.env matches your
+          PostgreSQL port (default PostgreSQL port is 5432,
+          not 5433 — adjust accordingly).
+
+Problem : PostGIS functions not found (ST_Touches etc.)
+Fix     : Connect to agent_2_db and run:
+              CREATE EXTENSION IF NOT EXISTS postgis;
+
+Problem : Agent 1 unreachable during KQML ask
+Fix     : Confirm Agent 1 is running:
+              curl http://localhost:8000/health
+          Check AGENT1_URL in agent2\.env.
+
+====================================================
