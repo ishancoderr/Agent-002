@@ -72,5 +72,5 @@ def receive_kqml(msg: KQMLMessage):
         "in_reply_to": msg.reply_with,
         "language":    "GeoSQL",
         "ontology":    "German-Geostats-v1",
-        "content":     {"found_slots": found_slots, "missing_slots": missing_slots},
+        "content":     {"found_slots": found_slots, "missing_slots": missing_slots, "tokens_consumed": 0},
     }

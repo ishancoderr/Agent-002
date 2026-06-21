@@ -15,7 +15,7 @@ from agent2.pipeline.query_parser import parse_query
 
 
 def build_sql(query: str) -> None:
-    params = parse_query(query)
+    params, _ = parse_query(query)
 
     states = params.spatial
     years  = params.temporal

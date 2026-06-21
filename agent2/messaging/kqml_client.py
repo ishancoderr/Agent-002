@@ -20,7 +20,7 @@ log = logging.getLogger("agent2.messaging.kqml_client")
 AGENT1_URL = AGENT_REGISTRY.get("Agent-1", "http://localhost:8000")
 
 
-def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
+def send_kqml_ask(gaps: List[GapSlot], request_id: str = "") -> Dict[str, Any]:
     missing_slots: List[MissingSlot] = [
         MessageFactory.missing_slot(
             spatial=gap.spatial[0] if len(gap.spatial) == 1 else gap.spatial,
@@ -34,6 +34,7 @@ def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
         sender="Agent-2",
         receiver="Agent-1",
         missing_slots=missing_slots,
+        reply_with=request_id or None,
     )
 
     payload = JSONSerializer.to_dict(msg)
@@ -77,4 +78,9 @@ def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
     if still_missing:
         log.info("       │ Still missing  : %s", sorted(set(still_missing)))
 
-    return {"found": found, "missing": still_missing}
+    tokens_agent1 = tell.content.tokens_consumed if hasattr(tell.content, "tokens_consumed") else 0
+    # fall back to raw dict if kqml_messaging doesn't expose the field as an attribute
+    if tokens_agent1 == 0 and isinstance(response.json().get("content"), dict):
+        tokens_agent1 = response.json()["content"].get("tokens_consumed", 0)
+
+    return {"found": found, "missing": still_missing, "tokens_agent1": tokens_agent1}

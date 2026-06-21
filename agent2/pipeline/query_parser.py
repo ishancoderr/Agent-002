@@ -89,7 +89,8 @@ class QueryParams:
     raw_query: str = ""
 
 
-def parse_query(query: str) -> QueryParams:
+def parse_query(query: str) -> tuple:
+    """Returns (QueryParams, tokens_consumed: int)."""
     log.info("       │ Sending to GPT-4o mini ...")
     log.info("       │ Input : %r", query)
 
@@ -104,8 +105,11 @@ def parse_query(query: str) -> QueryParams:
         ],
     )
 
-    raw = response.choices[0].message.content.strip()
+    raw            = response.choices[0].message.content.strip()
+    tokens_consumed = response.usage.total_tokens if response.usage else 0
+
     log.info("       │ LLM response: %s", raw)
+    log.info("       │ Tokens used : %d", tokens_consumed)
 
     data = json.loads(raw)
 
@@ -123,11 +127,13 @@ def parse_query(query: str) -> QueryParams:
             distance_km=rel_data.get("distance_km"),
         )
 
-    return QueryParams(
-        query_type  = data.get("query_type", "DIRECT_LOOKUP"),
-        spatial     = spatial,
-        temporal    = data.get("temporal", []),
-        attributes  = data.get("attributes", ["population"]),
+    params = QueryParams(
+        query_type           = data.get("query_type", "DIRECT_LOOKUP"),
+        spatial              = spatial,
+        temporal             = data.get("temporal", []),
+        attributes           = data.get("attributes", ["population"]),
         spatial_relationship = spatial_rel,
-        raw_query   = query,
+        raw_query            = query,
     )
+
+    return params, tokens_consumed
