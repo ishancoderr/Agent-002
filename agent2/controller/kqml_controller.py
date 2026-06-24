@@ -67,10 +67,12 @@ def receive_kqml(msg: KQMLMessage):
     log.info(SEPARATOR)
 
     return {
-        "sender":      "Agent-2",
-        "receiver":    msg.sender,
-        "in_reply_to": msg.reply_with,
-        "language":    "GeoSQL",
-        "ontology":    "German-Geostats-v1",
-        "content":     {"found_slots": found_slots, "missing_slots": missing_slots, "tokens_consumed": 0},
+        "performative": "tell",
+        "sender":       "Agent-2",
+        "receiver":     msg.sender,
+        "in_reply_to":  msg.reply_with,
+        "language":     "GeoSQL",
+        "ontology":     "German-Geostats-v1",
+        "metadata":     {"token_usage": 0},
+        "content":      {"found_slots": found_slots, "missing_slots": missing_slots},
     }

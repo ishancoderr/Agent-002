@@ -78,9 +78,6 @@ def send_kqml_ask(gaps: List[GapSlot], request_id: str = "") -> Dict[str, Any]:
     if still_missing:
         log.info("       │ Still missing  : %s", sorted(set(still_missing)))
 
-    tokens_agent1 = tell.content.tokens_consumed if hasattr(tell.content, "tokens_consumed") else 0
-    # fall back to raw dict if kqml_messaging doesn't expose the field as an attribute
-    if tokens_agent1 == 0 and isinstance(response.json().get("content"), dict):
-        tokens_agent1 = response.json()["content"].get("tokens_consumed", 0)
+    tokens_agent1 = tell.metadata.token_usage if tell.metadata is not None else 0
 
     return {"found": found, "missing": still_missing, "tokens_agent1": tokens_agent1}
