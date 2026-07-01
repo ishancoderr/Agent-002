@@ -55,6 +55,13 @@ def merge_results(
                     merged[key] = entry
                     log.info("       │ [MISSING     ] %s %d → all null", state, year)
 
+    # Ensure every record has all requested attributes (null for missing ones)
+    if requested_attrs:
+        for entry in merged.values():
+            for attr in requested_attrs:
+                if attr not in entry:
+                    entry[attr] = None
+
     result = sorted(merged.values(), key=lambda x: (x.get("state", ""), x.get("year", 0)))
     log.info("       │ Sorted merged list: %d records", len(result))
     return result

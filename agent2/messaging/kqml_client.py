@@ -80,4 +80,6 @@ def send_kqml_ask(gaps: List[GapSlot], request_id: str = "") -> Dict[str, Any]:
 
     tokens_agent1 = tell.metadata.token_usage if tell.metadata is not None else 0
 
+    still_missing = list(dict.fromkeys(still_missing))
+
     return {"found": found, "missing": still_missing, "tokens_agent1": tokens_agent1}

@@ -68,8 +68,13 @@ def _adjacency(rel: SpatialRelationship, db: Session) -> List[str]:
 
 
 def _direction(rel: SpatialRelationship, db: Session) -> List[str]:
-    ref  = rel.refs[0] if rel.refs else "Bayern"
-    cond = _DIRECTION_SQL.get(rel.type, _DIRECTION_SQL["north_of"])
+    if not rel.refs:
+        raise ValueError("SPATIAL_DIRECTION query requires a reference state in 'refs' but none was provided.")
+    ref = rel.refs[0]
+    cond = _DIRECTION_SQL.get(rel.type)
+    if cond is None:
+        valid = ", ".join(_DIRECTION_SQL.keys())
+        raise ValueError(f"Unknown direction type {rel.type!r}. Valid types: {valid}.")
 
     rows = db.execute(
         text(f"""
@@ -91,8 +96,12 @@ def _direction(rel: SpatialRelationship, db: Session) -> List[str]:
 
 
 def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
-    city   = rel.refs[0] if rel.refs else "München"
-    dist_m = (rel.distance_km or 100) * 1000
+    if not rel.refs:
+        raise ValueError("SPATIAL_DISTANCE query requires a reference city in 'refs' but none was provided.")
+    if rel.distance_km is None:
+        raise ValueError("SPATIAL_DISTANCE query requires 'distance_km' but it was not provided.")
+    city   = rel.refs[0]
+    dist_m = rel.distance_km * 1000
 
     rows = db.execute(
         text("""

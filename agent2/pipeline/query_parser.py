@@ -106,7 +106,9 @@ def parse_query(query: str) -> tuple:
     )
 
     raw            = response.choices[0].message.content.strip()
-    tokens_consumed = response.usage.total_tokens if response.usage else 0
+    if response.usage is None:
+        raise RuntimeError("OpenAI response missing usage/token data — cannot track token consumption.")
+    tokens_consumed = response.usage.total_tokens
 
     log.info("       │ LLM response: %s", raw)
     log.info("       │ Tokens used : %d", tokens_consumed)
