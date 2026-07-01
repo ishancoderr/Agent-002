@@ -49,7 +49,7 @@ def send_kqml_ask(gaps: List[GapSlot], request_id: str = "") -> Dict[str, Any]:
     response = httpx.post(
         f"{AGENT1_URL}/kqml/receive",
         json=payload,
-        timeout=30.0,
+        timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0),
     )
     response.raise_for_status()
 
@@ -78,7 +78,9 @@ def send_kqml_ask(gaps: List[GapSlot], request_id: str = "") -> Dict[str, Any]:
     if still_missing:
         log.info("       │ Still missing  : %s", sorted(set(still_missing)))
 
-    tokens_agent1 = tell.metadata.token_usage if tell.metadata is not None else 0
+    tokens_agent1 = 0
+    if hasattr(tell, "metadata") and tell.metadata is not None:
+        tokens_agent1 = getattr(tell.metadata, "token_usage", 0) or 0
 
     still_missing = list(dict.fromkeys(still_missing))
 

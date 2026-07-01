@@ -33,7 +33,10 @@ class KQMLMessage(BaseModel):
 @router.post("/kqml/receive")
 def receive_kqml(msg: KQMLMessage):
     log.info(SEPARATOR)
-    log.info("KQML   │ Incoming ask from %s  req=%s", msg.sender, msg.reply_with)
+    log.info("                       START")
+    log.info("       Incoming KQML request received by Agent 2")
+    log.info(SEPARATOR)
+    log.info("KQML   │ From: %s  req=%s", msg.sender, msg.reply_with)
     log.info("       │ Missing slots: %d", len(msg.content.get("missing_slots", [])))
 
     found_slots   = []

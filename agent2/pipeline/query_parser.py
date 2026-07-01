@@ -40,12 +40,27 @@ Mecklenburg-Vorpommern, Niedersachsen, Nordrhein-Westfalen, Rheinland-Pfalz,
 Saarland, Sachsen, Sachsen-Anhalt, Schleswig-Holstein, Thüringen
 
 Valid attributes: population, marriages, live_births
+  - "married", "marriage", "marriages" → always output "marriages"
+  - "live birth", "births", "live_birth" → always output "live_births"
+
+For temporal ranges always output temporal_start and temporal_end as integers, NOT an array.
+The system will expand the range into individual years.
+
+City names – always use the German spelling with umlauts:
+  Munich / München   → "München"
+  Cologne / Köln     → "Köln"
+  Nuremberg / Nürnberg → "Nürnberg"
+  Dusseldorf         → "Düsseldorf"
+  Frankfurt          → "Frankfurt"
+  Stuttgart          → "Stuttgart"
+  Hamburg            → "Hamburg"
 
 Return JSON:
 {
   "query_type": "DIRECT_LOOKUP" | "SPATIAL_ADJACENCY" | "SPATIAL_DIRECTION" | "SPATIAL_DISTANCE",
   "spatial": ["Bayern"] or "all",
-  "temporal": [2020, 2021],
+  "temporal_start": 2020,
+  "temporal_end": 2021,
   "attributes": ["population"],
   "spatial_relationship": {
     "type": "adjacency" | "north_of" | "south_of" | "east_of" | "west_of" | "distance",
@@ -56,19 +71,25 @@ Return JSON:
 
 Examples:
 "Give me population for all German states in 2021"
-→ {"query_type":"DIRECT_LOOKUP","spatial":"all","temporal":[2021],"attributes":["population"],"spatial_relationship":null}
+→ {"query_type":"DIRECT_LOOKUP","spatial":"all","temporal_start":2021,"temporal_end":2021,"attributes":["population"],"spatial_relationship":null}
 
 "Give me marriages and live_births for Bayern from 2019 to 2023"
-→ {"query_type":"DIRECT_LOOKUP","spatial":["Bayern"],"temporal":[2019,2020,2021,2022,2023],"attributes":["marriages","live_births"],"spatial_relationship":null}
+→ {"query_type":"DIRECT_LOOKUP","spatial":["Bayern"],"temporal_start":2019,"temporal_end":2023,"attributes":["marriages","live_births"],"spatial_relationship":null}
+
+"Give me married and live birth data for Berlin in 2020"
+→ {"query_type":"DIRECT_LOOKUP","spatial":["Berlin"],"temporal_start":2020,"temporal_end":2020,"attributes":["marriages","live_births"],"spatial_relationship":null}
 
 "Which state borders both Hessen and Hamburg? Show population 2015-2024"
-→ {"query_type":"SPATIAL_ADJACENCY","spatial":"all","temporal":[2015,2016,2017,2018,2019,2020,2021,2022,2023,2024],"attributes":["population"],"spatial_relationship":{"type":"adjacency","refs":["Hessen","Hamburg"],"distance_km":null}}
+→ {"query_type":"SPATIAL_ADJACENCY","spatial":"all","temporal_start":2015,"temporal_end":2024,"attributes":["population"],"spatial_relationship":{"type":"adjacency","refs":["Hessen","Hamburg"],"distance_km":null}}
 
-"States north of Bayern for 2020 and 2021, population and marriages"
-→ {"query_type":"SPATIAL_DIRECTION","spatial":"all","temporal":[2020,2021],"attributes":["population","marriages"],"spatial_relationship":{"type":"north_of","refs":["Bayern"],"distance_km":null}}
+"States north of Bayern for 2020 and 2021, population and married"
+→ {"query_type":"SPATIAL_DIRECTION","spatial":"all","temporal_start":2020,"temporal_end":2021,"attributes":["population","marriages"],"spatial_relationship":{"type":"north_of","refs":["Bayern"],"distance_km":null}}
 
-"Which states are within 100 km of München, population in 2021"
-→ {"query_type":"SPATIAL_DISTANCE","spatial":"all","temporal":[2021],"attributes":["population"],"spatial_relationship":{"type":"distance","refs":["München"],"distance_km":100}}
+"Which states are within 100 km of Munich, population in 2021"
+→ {"query_type":"SPATIAL_DISTANCE","spatial":"all","temporal_start":2021,"temporal_end":2021,"attributes":["population"],"spatial_relationship":{"type":"distance","refs":["München"],"distance_km":100}}
+
+"States within 150 km of Cologne, population and marriages 2020"
+→ {"query_type":"SPATIAL_DISTANCE","spatial":"all","temporal_start":2020,"temporal_end":2020,"attributes":["population","marriages"],"spatial_relationship":{"type":"distance","refs":["Köln"],"distance_km":150}}
 """
 
 
@@ -89,6 +110,11 @@ class QueryParams:
     raw_query: str = ""
 
 
+VALID_ATTRS = {"population", "marriages", "live_births"}
+MIN_YEAR    = 1990
+MAX_YEAR    = 2030
+
+
 def parse_query(query: str) -> tuple:
     """Returns (QueryParams, tokens_consumed: int)."""
     log.info("       │ Sending to GPT-4o mini ...")
@@ -98,14 +124,16 @@ def parse_query(query: str) -> tuple:
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        max_tokens=512,
+        max_tokens=300,
+        temperature=0,
+        response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": _SYSTEM},
             {"role": "user",   "content": query},
         ],
     )
 
-    raw            = response.choices[0].message.content.strip()
+    raw = response.choices[0].message.content.strip()
     if response.usage is None:
         raise RuntimeError("OpenAI response missing usage/token data — cannot track token consumption.")
     tokens_consumed = response.usage.total_tokens
@@ -114,6 +142,23 @@ def parse_query(query: str) -> tuple:
     log.info("       │ Tokens used : %d", tokens_consumed)
 
     data = json.loads(raw)
+
+    # Expand temporal_start / temporal_end into a list of years
+    t_start = int(data.get("temporal_start", data.get("temporal_end", 2021)))
+    t_end   = int(data.get("temporal_end",   t_start))
+    t_start = max(t_start, MIN_YEAR)
+    t_end   = min(t_end,   MAX_YEAR)
+    temporal = list(range(t_start, t_end + 1))
+
+    # Validate attributes — drop unknowns, default to population if empty
+    raw_attrs  = data.get("attributes", ["population"])
+    attributes = [a for a in raw_attrs if a in VALID_ATTRS]
+    invalid    = [a for a in raw_attrs if a not in VALID_ATTRS]
+    if invalid:
+        log.warning("       │ Dropped unknown attributes: %s", invalid)
+    if not attributes:
+        log.warning("       │ No valid attributes in GPT output %s — defaulting to population", raw_attrs)
+        attributes = ["population"]
 
     spatial = data.get("spatial", "all")
     spatial = ["all"] if spatial == "all" else (
@@ -129,11 +174,14 @@ def parse_query(query: str) -> tuple:
             distance_km=rel_data.get("distance_km"),
         )
 
+    log.info("       │ Temporal    : %d → %d (%d years)", t_start, t_end, len(temporal))
+    log.info("       │ Attributes  : %s", attributes)
+
     params = QueryParams(
         query_type           = data.get("query_type", "DIRECT_LOOKUP"),
         spatial              = spatial,
-        temporal             = data.get("temporal", []),
-        attributes           = data.get("attributes", ["population"]),
+        temporal             = temporal,
+        attributes           = attributes,
         spatial_relationship = spatial_rel,
         raw_query            = query,
     )

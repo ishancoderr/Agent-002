@@ -27,15 +27,8 @@ ALL_STATES = [
 
 
 def _print_sql(label: str, sql: str, params: Dict) -> None:
-    line = "=" * 60
-    print(f"\n{line}")
-    print(f"  SQL ▶ {label}")
-    print(line)
-    print(sql.strip())
-    print(line)
-    for k, v in params.items():
-        print(f"  {k} = {v}")
-    print(f"{line}\n")
+    param_str = "  ".join(f"{k}={v}" for k, v in params.items())
+    log.debug("SQL ▶ %s | %s\n%s", label, param_str, sql.strip())
 
 
 @dataclass

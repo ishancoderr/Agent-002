@@ -1,12 +1,12 @@
 """
 Step 2 — Resolve spatial-relationship queries into concrete state name lists
-using PostGIS functions (ST_Touches, ST_Azimuth, ST_DWithin).
+using PostGIS functions (ST_Intersects, ST_Azimuth, ST_DWithin).
 Skipped entirely for DIRECT_LOOKUP queries.
 """
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Optional, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -21,6 +21,17 @@ _DIRECTION_SQL = {
     "south_of": "(az BETWEEN 135 AND 225)",
     "east_of":  "(az BETWEEN 45  AND 135)",
     "west_of":  "(az BETWEEN 225 AND 315)",
+}
+
+_CITY_ALIASES: dict = {
+    "Munich":      "München",
+    "Muenchen":    "München",
+    "Cologne":     "Köln",
+    "Koeln":       "Köln",
+    "Nuremberg":   "Nürnberg",
+    "Nuernberg":   "Nürnberg",
+    "Dusseldorf":  "Düsseldorf",
+    "Duesseldorf": "Düsseldorf",
 }
 
 
@@ -52,12 +63,16 @@ def _adjacency(rel: SpatialRelationship, db: Session) -> List[str]:
             text("""
                 SELECT s2.state_name
                 FROM states s1
-                JOIN states s2 ON ST_Touches(s1.geo_shape, s2.geo_shape)
-                WHERE s1.state_name = :ref AND s2.state_name != :ref
+                JOIN states s2
+                  ON ST_Intersects(s1.geo_shape, s2.geo_shape)
+                 AND NOT ST_Equals(s1.geo_shape, s2.geo_shape)
+                WHERE s1.state_name = :ref
+                  AND s2.state_name != :ref
             """),
             {"ref": ref},
         ).fetchall()
         sets.append({r[0] for r in rows})
+        log.info("       │ States touching %s: %s", ref, sorted({r[0] for r in rows}))
 
     if not sets:
         return []
@@ -95,29 +110,89 @@ def _direction(rel: SpatialRelationship, db: Session) -> List[str]:
     return [r[0] for r in rows]
 
 
+def _resolve_city_coords(city: str, db: Session) -> Optional[Tuple[float, float]]:
+    """
+    Find a city in the DB and return its (lat, lng).
+    Resolution order:
+      1. Exact match on city_name
+      2. Alias map → exact match
+      3. Case-insensitive ILIKE match
+      4. Partial ILIKE match (shortest name wins)
+    """
+    candidates = list(dict.fromkeys(filter(None, [
+        city,
+        _CITY_ALIASES.get(city),
+        _CITY_ALIASES.get(city.title()),
+    ])))
+
+    for name in candidates:
+        row = db.execute(
+            text("SELECT lat, lng FROM cities WHERE city_name = :n LIMIT 1"),
+            {"n": name},
+        ).fetchone()
+        if row:
+            log.info("       │ City resolved (exact) : %r → lat=%s lng=%s", city, row[0], row[1])
+            return row[0], row[1]
+
+    for name in candidates:
+        row = db.execute(
+            text("SELECT lat, lng, city_name FROM cities WHERE city_name ILIKE :n LIMIT 1"),
+            {"n": name},
+        ).fetchone()
+        if row:
+            log.info("       │ City resolved (ilike) : %r → %r lat=%s lng=%s", city, row[2], row[0], row[1])
+            return row[0], row[1]
+
+    for name in candidates:
+        row = db.execute(
+            text("""
+                SELECT lat, lng, city_name FROM cities
+                WHERE city_name ILIKE :n
+                ORDER BY LENGTH(city_name)
+                LIMIT 1
+            """),
+            {"n": f"%{name}%"},
+        ).fetchone()
+        if row:
+            log.info("       │ City resolved (partial): %r → %r lat=%s lng=%s", city, row[2], row[0], row[1])
+            return row[0], row[1]
+
+    log.warning("       │ City %r not found in cities table (tried: %s)", city, candidates)
+    return None
+
+
 def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
     if not rel.refs:
         raise ValueError("SPATIAL_DISTANCE query requires a reference city in 'refs' but none was provided.")
     if rel.distance_km is None:
         raise ValueError("SPATIAL_DISTANCE query requires 'distance_km' but it was not provided.")
-    city   = rel.refs[0]
-    dist_m = rel.distance_km * 1000
 
+    raw_city = rel.refs[0]
+    dist_m   = rel.distance_km * 1000
+
+    coords = _resolve_city_coords(raw_city, db)
+    if coords is None:
+        log.warning("       │ Cannot resolve city %r — returning empty", raw_city)
+        return []
+
+    lat, lng = coords
     rows = db.execute(
         text("""
             SELECT s.state_name
             FROM states s
             WHERE ST_DWithin(
                 s.geo_shape::geography,
-                (SELECT centroid::geography FROM cities WHERE city_name = :city),
+                ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography,
                 :dist
             )
             ORDER BY ST_Distance(
                 s.geo_shape::geography,
-                (SELECT centroid::geography FROM cities WHERE city_name = :city)
+                ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography
             )
         """),
-        {"city": city, "dist": dist_m},
+        {"lat": lat, "lng": lng, "dist": dist_m},
     ).fetchall()
 
+    log.info("       │ States within %d km of %r : %s",
+             int(dist_m / 1000), raw_city, [r[0] for r in rows])
     return [r[0] for r in rows]
