@@ -52,21 +52,48 @@ def resolve_geometries(
     return found, missing
 
 
+_CITY_ALIASES: dict = {
+    "München": "Munich",
+    "Muenchen": "Munich",
+    "Cologne": "Köln",
+    "Köln": "Cologne",
+    "Koeln": "Cologne",
+    "Nürnberg": "Nuremberg",
+    "Nuernberg": "Nuremberg",
+    "Düsseldorf": "Dusseldorf",
+    "Duesseldorf": "Dusseldorf",
+}
+
+
 def _lookup(entity: str, entity_type: str, db) -> str | None:
     if entity_type == "city":
+        candidates = list(dict.fromkeys(filter(None, [
+            entity,
+            _CITY_ALIASES.get(entity),
+            _CITY_ALIASES.get(entity.title()),
+        ])))
+        for name in candidates:
+            row = db.execute(
+                text("SELECT ST_AsText(centroid) FROM cities WHERE city_name = :n LIMIT 1"),
+                {"n": name},
+            ).fetchone()
+            if row is not None:
+                log.info("       │ City resolved as %r", name)
+                return row[0]
+        # partial ILIKE fallback
         row = db.execute(
-            text("SELECT ST_AsText(centroid) FROM cities WHERE city_name = :n LIMIT 1"),
-            {"n": entity},
+            text("SELECT ST_AsText(centroid) FROM cities WHERE city_name ILIKE :n ORDER BY LENGTH(city_name) LIMIT 1"),
+            {"n": f"%{entity}%"},
         ).fetchone()
+        return row[0] if row is not None else None
+
     elif entity_type == "state":
         row = db.execute(
             text("SELECT ST_AsText(geo_shape) FROM states WHERE state_name = :n LIMIT 1"),
             {"n": entity},
         ).fetchone()
+        return row[0] if row is not None else None
+
     else:
         log.warning("       │ Unknown entity_type %r for %r — skipping", entity_type, entity)
         return None
-
-    if row is None:
-        return None   # unknown-feature: no row at all
-    return row[0]     # may be None if geometry column is NULL (geometry-null case)

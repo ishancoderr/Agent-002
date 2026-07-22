@@ -6,6 +6,7 @@ Supported query types:
   SPATIAL_ADJACENCY  – "state that borders both Hessen and Hamburg"
   SPATIAL_DIRECTION  – "states north of Bayern"
   SPATIAL_DISTANCE   – "states within 100 km of München"
+  GEOMETRY_LOOKUP    – "geometry of Munich city" / "shapes of Bayern and Köln"
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import openai
 from dotenv import load_dotenv
@@ -29,6 +30,13 @@ GERMAN_STATES = [
     "Nordrhein-Westfalen", "Rheinland-Pfalz", "Saarland", "Sachsen",
     "Sachsen-Anhalt", "Schleswig-Holstein", "Thüringen",
 ]
+
+VALID_QUERY_TYPES  = {"DIRECT_LOOKUP", "SPATIAL_ADJACENCY", "SPATIAL_DIRECTION",
+                      "SPATIAL_DISTANCE", "GEOMETRY_LOOKUP"}
+VALID_ATTRS        = {"population", "marriages", "live_births"}
+VALID_ENTITY_TYPES = {"city", "state"}
+MIN_YEAR           = 1990
+MAX_YEAR           = 2030
 
 _SYSTEM = """\
 You are a query parser for a geospatial statistics database about German federal states.
@@ -45,6 +53,7 @@ Valid attributes: population, marriages, live_births
 
 For temporal ranges always output temporal_start and temporal_end as integers, NOT an array.
 The system will expand the range into individual years.
+If no year is mentioned default to temporal_start=2021, temporal_end=2021.
 
 City names – always use the German spelling with umlauts:
   Munich / München   → "München"
@@ -55,7 +64,25 @@ City names – always use the German spelling with umlauts:
   Stuttgart          → "Stuttgart"
   Hamburg            → "Hamburg"
 
-Return JSON:
+ENTITY TYPE RULES:
+  - If the name is one of the 16 German federal states → entity_type = "state"
+  - If the name is a city → entity_type = "city"
+  - "Berlin" is BOTH a city and a state. For GEOMETRY_LOOKUP default to entity_type = "state"
+    unless the user explicitly says "city of Berlin".
+  - "Hamburg" and "Bremen" are also both cities and states — same rule, default to "state".
+
+GEOMETRY QUERIES:
+  If the user asks for geometry, shape, boundary, centroid, WKT, coordinates, or spatial
+  extent of ANY number of cities or states, output query_type = "GEOMETRY_LOOKUP".
+  List ALL requested entities. Do NOT include attributes or temporal fields.
+
+UNKNOWN / UNANSWERABLE QUERIES:
+  If the query is completely unrelated to German geospatial statistics or geometry,
+  still output a valid JSON with query_type = "DIRECT_LOOKUP", spatial = [], attributes = ["population"],
+  temporal_start = 2021, temporal_end = 2021. Never return an error or non-JSON.
+
+─────────────────────────────────────────────────────────────
+DEMOGRAPHICS schema:
 {
   "query_type": "DIRECT_LOOKUP" | "SPATIAL_ADJACENCY" | "SPATIAL_DIRECTION" | "SPATIAL_DISTANCE",
   "spatial": ["Bayern"] or "all",
@@ -69,7 +96,17 @@ Return JSON:
   } or null
 }
 
-Examples:
+GEOMETRY schema:
+{
+  "query_type": "GEOMETRY_LOOKUP",
+  "entities": [
+    {"entity_name": "München", "entity_type": "city"},
+    {"entity_name": "Bayern",  "entity_type": "state"}
+  ]
+}
+─────────────────────────────────────────────────────────────
+EXAMPLES:
+
 "Give me population for all German states in 2021"
 → {"query_type":"DIRECT_LOOKUP","spatial":"all","temporal_start":2021,"temporal_end":2021,"attributes":["population"],"spatial_relationship":null}
 
@@ -82,14 +119,23 @@ Examples:
 "Which state borders both Hessen and Hamburg? Show population 2015-2024"
 → {"query_type":"SPATIAL_ADJACENCY","spatial":"all","temporal_start":2015,"temporal_end":2024,"attributes":["population"],"spatial_relationship":{"type":"adjacency","refs":["Hessen","Hamburg"],"distance_km":null}}
 
-"States north of Bayern for 2020 and 2021, population and married"
+"States north of Bayern, population and marriages 2020-2021"
 → {"query_type":"SPATIAL_DIRECTION","spatial":"all","temporal_start":2020,"temporal_end":2021,"attributes":["population","marriages"],"spatial_relationship":{"type":"north_of","refs":["Bayern"],"distance_km":null}}
 
-"Which states are within 100 km of Munich, population in 2021"
+"States within 100 km of Munich, population in 2021"
 → {"query_type":"SPATIAL_DISTANCE","spatial":"all","temporal_start":2021,"temporal_end":2021,"attributes":["population"],"spatial_relationship":{"type":"distance","refs":["München"],"distance_km":100}}
 
-"States within 150 km of Cologne, population and marriages 2020"
-→ {"query_type":"SPATIAL_DISTANCE","spatial":"all","temporal_start":2020,"temporal_end":2020,"attributes":["population","marriages"],"spatial_relationship":{"type":"distance","refs":["Köln"],"distance_km":150}}
+"What is the geometry of Munich city?"
+→ {"query_type":"GEOMETRY_LOOKUP","entities":[{"entity_name":"München","entity_type":"city"}]}
+
+"Show me the boundary of Bayern state"
+→ {"query_type":"GEOMETRY_LOOKUP","entities":[{"entity_name":"Bayern","entity_type":"state"}]}
+
+"What are the geometries of München and Bayern?"
+→ {"query_type":"GEOMETRY_LOOKUP","entities":[{"entity_name":"München","entity_type":"city"},{"entity_name":"Bayern","entity_type":"state"}]}
+
+"Give me geometries for Berlin, Hamburg, Köln and Frankfurt"
+→ {"query_type":"GEOMETRY_LOOKUP","entities":[{"entity_name":"Berlin","entity_type":"state"},{"entity_name":"Hamburg","entity_type":"state"},{"entity_name":"Köln","entity_type":"city"},{"entity_name":"Frankfurt","entity_type":"city"}]}
 """
 
 
@@ -108,11 +154,27 @@ class QueryParams:
     attributes: List[str]
     spatial_relationship: Optional[SpatialRelationship] = None
     raw_query: str = ""
+    # GEOMETRY_LOOKUP only
+    entities: Optional[List[Dict[str, str]]] = None
 
 
-VALID_ATTRS = {"population", "marriages", "live_births"}
-MIN_YEAR    = 1990
-MAX_YEAR    = 2030
+def _sanitize_entities(raw: Any) -> List[Dict[str, str]]:
+    """Validate and clean the entities list from GPT output."""
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name  = str(item.get("entity_name", "")).strip()
+        etype = str(item.get("entity_type", "city")).strip().lower()
+        if not name:
+            continue
+        if etype not in VALID_ENTITY_TYPES:
+            etype = "state" if name in GERMAN_STATES else "city"
+            log.warning("       │ Unknown entity_type for %r — inferred as %s", name, etype)
+        result.append({"entity_name": name, "entity_type": etype})
+    return result
 
 
 def parse_query(query: str) -> tuple:
@@ -142,6 +204,24 @@ def parse_query(query: str) -> tuple:
     log.info("       │ Tokens used : %d", tokens_consumed)
 
     data = json.loads(raw)
+
+    # ── Geometry lookup — short-circuit before demographics parsing ───────────
+    if data.get("query_type") == "GEOMETRY_LOOKUP":
+        entities = _sanitize_entities(data.get("entities", []))
+        log.info("       │ GEOMETRY_LOOKUP : %d entity/entities", len(entities))
+        for e in entities:
+            log.info("       │   %s (%s)", e["entity_name"], e["entity_type"])
+        if not entities:
+            raise ValueError("GEOMETRY_LOOKUP query must include at least one entity")
+        params = QueryParams(
+            query_type = "GEOMETRY_LOOKUP",
+            spatial    = [],
+            temporal   = [],
+            attributes = [],
+            raw_query  = query,
+            entities   = entities,
+        )
+        return params, tokens_consumed
 
     # Expand temporal_start / temporal_end into a list of years
     t_start = int(data.get("temporal_start", data.get("temporal_end", 2021)))
