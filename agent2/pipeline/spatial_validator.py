@@ -16,6 +16,55 @@ from .query_parser import QueryParams, SpatialRelationship
 
 log = logging.getLogger("agent2.pipeline.spatial")
 
+
+def _fill_missing_state_geometries(db: Session) -> List[str]:
+    """
+    Find states with NULL geo_shape and sync ALL state geometries from Agent-1
+    to ensure both agents use identical reference polygons for consistent
+    PostGIS distance results.
+    Returns list of state names that were updated.
+    """
+    rows = db.execute(
+        text("SELECT state_name FROM states WHERE geo_shape IS NULL")
+    ).fetchall()
+    missing = [r[0] for r in rows]
+
+    log.info("       │ Geo-shape check: %d NULL state(s) found", len(missing))
+
+    if not missing:
+        return []
+
+    log.info("       │ States with NULL geo_shape: %s — syncing from Agent-1", missing)
+
+    try:
+        from kqml_messaging import MessageFactory
+        from ..messaging.kqml_geometry_client import send_kqml_geometry_ask
+
+        slots = [
+            MessageFactory.missing_geometry_slot(spatial_entity=s, entity_type="state")
+            for s in missing
+        ]
+        resp  = send_kqml_geometry_ask(slots)
+        found = resp.get("found", [])
+
+        filled = []
+        for fg in found:
+            db.execute(
+                text("UPDATE states SET geo_shape = ST_GeomFromText(:wkt, 4326) WHERE state_name = :name"),
+                {"wkt": fg.geometry, "name": fg.spatial_entity},
+            )
+            log.info("       │ Filled geo_shape for %s from Agent-1", fg.spatial_entity)
+            filled.append(fg.spatial_entity)
+
+        if filled:
+            db.commit()
+            log.info("       │ Committed %d geometry/geometries to local DB", len(filled))
+        return filled
+
+    except Exception as exc:
+        log.warning("       │ Could not fetch missing geometries from Agent-1: %s", exc)
+        return []
+
 _DIRECTION_SQL = {
     "north_of": "(az <= 45 OR az >= 315)",
     "south_of": "(az BETWEEN 135 AND 225)",
@@ -23,15 +72,17 @@ _DIRECTION_SQL = {
     "west_of":  "(az BETWEEN 225 AND 315)",
 }
 
+# Maps any German/umlaut or ASCII variant → English DB name (Agent-2 stores English).
+# Used as a defensive fallback if the user types German directly.
 _CITY_ALIASES: dict = {
-    "Munich":      "München",
-    "Muenchen":    "München",
-    "Cologne":     "Köln",
-    "Koeln":       "Köln",
-    "Nuremberg":   "Nürnberg",
-    "Nuernberg":   "Nürnberg",
-    "Dusseldorf":  "Düsseldorf",
-    "Duesseldorf": "Düsseldorf",
+    "München":    "Munich",
+    "Muenchen":   "Munich",
+    "Köln":       "Cologne",
+    "Koeln":      "Cologne",
+    "Nürnberg":   "Nuremberg",
+    "Nuernberg":  "Nuremberg",
+    "Düsseldorf": "Dusseldorf",
+    "Duesseldorf":"Dusseldorf",
 }
 
 
@@ -42,6 +93,11 @@ def validate_spatial(params: QueryParams) -> QueryParams:
 
     db = SessionLocal()
     try:
+        # Fill any NULL geo_shapes from Agent-1 before running PostGIS queries
+        filled = _fill_missing_state_geometries(db)
+        if filled:
+            log.info("       │ Pre-filled geometries from Agent-1: %s", filled)
+
         log.info("       │ Resolving %s via PostGIS ...", params.query_type)
         if params.query_type == "SPATIAL_ADJACENCY":
             params.spatial = _adjacency(params.spatial_relationship, db)
@@ -112,12 +168,12 @@ def _direction(rel: SpatialRelationship, db: Session) -> List[str]:
 
 def _resolve_city_coords(city: str, db: Session) -> Optional[Tuple[float, float]]:
     """
-    Find a city in the DB and return its (lat, lng).
+    Find a city's (lat, lng).
     Resolution order:
-      1. Exact match on city_name
-      2. Alias map → exact match
-      3. Case-insensitive ILIKE match
-      4. Partial ILIKE match (shortest name wins)
+      1. Exact match on user-supplied name
+      2. Exact match on German alias (e.g. Munich → München)
+      3. Ask Agent-1 via KQML
+    No fuzzy/partial matching — wrong city is worse than no city.
     """
     candidates = list(dict.fromkeys(filter(None, [
         city,
@@ -131,34 +187,58 @@ def _resolve_city_coords(city: str, db: Session) -> Optional[Tuple[float, float]
             {"n": name},
         ).fetchone()
         if row:
-            log.info("       │ City resolved (exact) : %r → lat=%s lng=%s", city, row[0], row[1])
+            log.info("       │ City resolved locally: %r → %r  lat=%s lng=%s", city, name, row[0], row[1])
             return row[0], row[1]
 
-    for name in candidates:
-        row = db.execute(
-            text("SELECT lat, lng, city_name FROM cities WHERE city_name ILIKE :n LIMIT 1"),
-            {"n": name},
-        ).fetchone()
-        if row:
-            log.info("       │ City resolved (ilike) : %r → %r lat=%s lng=%s", city, row[2], row[0], row[1])
-            return row[0], row[1]
+    # Not found locally — ask Agent-1
+    log.info("       │ City %r not in local DB (tried: %s) — asking Agent-1", city, candidates)
+    coords = _fetch_city_coords_from_peer(city, db)
+    if coords:
+        return coords
 
-    for name in candidates:
-        row = db.execute(
-            text("""
-                SELECT lat, lng, city_name FROM cities
-                WHERE city_name ILIKE :n
-                ORDER BY LENGTH(city_name)
-                LIMIT 1
-            """),
-            {"n": f"%{name}%"},
-        ).fetchone()
-        if row:
-            log.info("       │ City resolved (partial): %r → %r lat=%s lng=%s", city, row[2], row[0], row[1])
-            return row[0], row[1]
+    raise ValueError(f"City {city!r} not found locally or in Agent-1 — cannot resolve coordinates.")
 
-    log.warning("       │ City %r not found in cities table (tried: %s)", city, candidates)
-    return None
+
+def _fetch_city_coords_from_peer(city: str, db: Session) -> Optional[Tuple[float, float]]:
+    """
+    Ask Agent-1 for a city's centroid WKT via KQML and parse lat/lng from it.
+    Does not write to the local DB — coordinates are used directly for this query.
+    """
+    try:
+        from kqml_messaging import MessageFactory
+        from ..messaging.kqml_geometry_client import send_kqml_geometry_ask
+
+        slot  = MessageFactory.missing_geometry_slot(spatial_entity=city, entity_type="city")
+        resp  = send_kqml_geometry_ask([slot])
+        found = resp.get("found", [])
+
+        if not found:
+            log.warning("       │ Agent-1 has no geometry for city %r", city)
+            return None
+
+        wkt = found[0].geometry  # e.g. "POINT(11.575 48.1375)"
+        coords = _parse_point_wkt(wkt)
+        if coords is None:
+            log.warning("       │ Cannot parse WKT for city %r: %r", city, wkt)
+            return None
+
+        lat, lng = coords
+        log.info("       │ Agent-1 centroid for %r: lat=%s lng=%s", city, lat, lng)
+        return lat, lng
+
+    except Exception as exc:
+        log.warning("       │ Peer city fetch failed for %r: %s", city, exc)
+        return None
+
+
+def _parse_point_wkt(wkt: str) -> Optional[Tuple[float, float]]:
+    """Parse WKT POINT(lng lat) → (lat, lng). Returns None if not a POINT."""
+    import re
+    m = re.match(r"POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)", wkt.strip(), re.IGNORECASE)
+    if not m:
+        return None
+    lng, lat = float(m.group(1)), float(m.group(2))
+    return lat, lng
 
 
 def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
@@ -170,12 +250,7 @@ def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
     raw_city = rel.refs[0]
     dist_m   = rel.distance_km * 1000
 
-    coords = _resolve_city_coords(raw_city, db)
-    if coords is None:
-        log.warning("       │ Cannot resolve city %r — returning empty", raw_city)
-        return []
-
-    lat, lng = coords
+    lat, lng = _resolve_city_coords(raw_city, db)
     rows = db.execute(
         text("""
             SELECT s.state_name

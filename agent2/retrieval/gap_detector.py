@@ -50,6 +50,7 @@ class GapSlot:
 class LocalResult:
     found: List[DataRecord] = field(default_factory=list)
     gaps: List[GapSlot] = field(default_factory=list)
+    queries: List[str] = field(default_factory=list)
 
 
 def execute_local_lookup(params: QueryParams) -> LocalResult:
@@ -60,6 +61,8 @@ def execute_local_lookup(params: QueryParams) -> LocalResult:
     log.info("       │ States to query : %s", states)
     log.info("       │ Years           : %s", years)
     log.info("       │ Attributes      : %s", attrs)
+
+    queries: List[str] = []
 
     db = SessionLocal()
     try:
@@ -73,6 +76,7 @@ FROM state_demographics sd
 JOIN states s ON s.state_id = sd.state_id
 WHERE s.state_name = ANY(ARRAY[{states_arr}]);"""
 
+        queries.append(sql_partition)
         _print_sql("STEP A — Partition check (which states exist in Agent-2)", sql_partition, {
             "states": states,
         })
@@ -100,6 +104,7 @@ WHERE s.state_name = ANY(ARRAY[{states_arr}]);"""
             return LocalResult(
                 found=[],
                 gaps=[GapSlot(spatial=spatial_gap_states, temporal=years, attributes=attrs)],
+                queries=queries,
             )
 
         # ── Step B: Main data lookup only for states in this partition ────────
@@ -114,6 +119,7 @@ WHERE s.state_name = ANY(ARRAY[{local_states_arr}])
   AND sd.stat_year  = ANY(ARRAY[{years_arr}])
 ORDER BY s.state_name, sd.stat_year;"""
 
+        queries.append(sql_main)
         _print_sql("STEP B — Main data lookup (local states only)", sql_main, {
             "states": local_states,
             "years":  years,
@@ -174,7 +180,7 @@ ORDER BY s.state_name, sd.stat_year;"""
         log.info("       │ Summary: found=%d  attr_gaps=%d  temp_gaps=%d  spatial_gaps=%d",
                  len(found), len(attr_gaps), len(temp_gaps), len(spatial_gap_states))
 
-        return LocalResult(found=found, gaps=gaps)
+        return LocalResult(found=found, gaps=gaps, queries=queries)
 
     finally:
         db.close()
@@ -230,12 +236,20 @@ WHERE s.state_name = ANY(ARRAY[{states_arr}])
             if len(present) == len(attrs):
                 complete_keys.add((state, yr))
 
-        # a slot is "missing" only if at least one (state, year) has no data at all
-        missing_states = [
-            s for s in states
-            if any((s, yr) not in partial_keys for yr in years)
-        ]
-        return {"found": found, "missing": list(dict.fromkeys(missing_states))}
+        # Residue per state: only the years actually not found, not the whole
+        # requested range — this is what should travel back in a KQML tell's
+        # missing_slots (Section 1.4's gap = Q \ D, not the original query).
+        missing_by_state: Dict[str, List[int]] = {}
+        for s in states:
+            residue_years = [yr for yr in years if (s, yr) not in partial_keys]
+            if residue_years:
+                missing_by_state[s] = residue_years
+
+        return {
+            "found": found,
+            "missing": list(missing_by_state.keys()),
+            "missing_by_state": missing_by_state,
+        }
 
     finally:
         db.close()
