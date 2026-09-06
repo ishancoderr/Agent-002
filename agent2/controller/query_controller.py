@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from kqml_messaging import MessageFactory
+from kqml_messaging import MessageFactory, response_status
 
 from ..pipeline import parse_query, validate_spatial
 from ..retrieval import execute_local_lookup
@@ -181,12 +181,7 @@ def _handle_geometry(params, raw_query: str, request_id: str,
             })
 
     total_req = len(entities)
-    if found_count == total_req:
-        status = "complete"
-    elif found_count == 0:
-        status = "not_found"
-    else:
-        status = "partial"
+    status = response_status(has_found=found_count > 0, has_missing=found_count < total_req)
 
     log.info(SEPARATOR)
     log.info("DONE   │ [%s] geometry status=%s  found=%d/%d  %.0f ms",
@@ -447,7 +442,7 @@ def handle_query(body: UserQuery):  # no response_model — geometry branch retu
     if params.query_type != "DIRECT_LOOKUP" and not params.attributes:
         t1 = time.perf_counter()
         states = [] if params.spatial == ["all"] else list(params.spatial)
-        status = "complete" if states else "not_found"
+        status = response_status(has_found=bool(states), has_missing=not states)
         total_ms = (t1 - t0) * 1000
 
         log.info(SEPARATOR)
@@ -507,10 +502,16 @@ def handle_query(body: UserQuery):  # no response_model — geometry branch retu
             },
             # A question that named a subject asked a yes/no. `verdict` carries
             # it; `states` still carries the set it was read from, so the answer
-            # can be checked. Null when the question asked for the list instead.
+            # can be checked. verdict is null both when the question asked for
+            # the list rather than a verdict, and when the subject or reference
+            # has no geometry anywhere - see `unknown_states` for the latter: a
+            # null verdict with the subject listed there means the relationship
+            # genuinely could not be tested, not "no".
             "verdict": params.verdict,
             "states": states,
-            "summary": {"total": len(states), "verdict": params.verdict},
+            "unknown_states": params.unknown_states,
+            "summary": {"total": len(states), "verdict": params.verdict,
+                       "unknown": len(params.unknown_states)},
             "performance": {
                 "phase1_ms": round(total_ms, 1),
                 "phase2_ms": 0.0,
@@ -615,12 +616,8 @@ def handle_query(body: UserQuery):  # no response_model — geometry branch retu
              completeness, present_pts, total_pts)
 
     # ── Final status ──────────────────────────────────────────────────────────
-    if len(complete_rows) == len(merged):
-        status = "complete"
-    elif present_pts == 0:
-        status = "not_found"
-    else:
-        status = "partial"
+    status = response_status(has_found=present_pts > 0,
+                             has_missing=len(complete_rows) != len(merged))
 
     phase1_ms = (t1 - t0) * 1000
     phase2_ms = (t2 - t1) * 1000
@@ -825,10 +822,10 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
             "total_records": len(names), "total_data_points": len(names),
             "present_data_points": len(names) - len(unresolved), "missing_data_points": len(unresolved),
             "complete_records": 0, "partial_records": 0, "empty_records": len(unresolved),
-            "status": "not_found",
+            "status": response_status(has_found=False, has_missing=True),
         })
         return {
-            "request_id": request_id, "status": "not_found",
+            "request_id": request_id, "status": response_status(has_found=False, has_missing=True),
             "query": {"raw": raw_query, "type": "SPATIAL_OPERATION", "operation": operation, "spatial": names},
             "still_missing": unresolved,
             "performance": {
@@ -928,12 +925,12 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         "total_records": len(names), "total_data_points": len(names),
         "present_data_points": len(names), "missing_data_points": 0,
         "complete_records": len(names), "partial_records": 0, "empty_records": 0,
-        "status": "complete",
+        "status": response_status(has_found=True, has_missing=False),
     })
 
     return {
         "request_id": request_id,
-        "status":     "complete",
+        "status":     response_status(has_found=True, has_missing=False),
         "query": {
             "raw":       raw_query,
             "type":      "SPATIAL_OPERATION",
@@ -1009,10 +1006,10 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
                 "tokens_agent2": tokens_agent2, "tokens_agent1": 0, "tokens_total": tokens_agent2,
                 "total_records": 0, "total_data_points": 0, "present_data_points": 0,
                 "missing_data_points": 0, "complete_records": 0, "partial_records": 0,
-                "empty_records": 0, "status": "not_found",
+                "empty_records": 0, "status": response_status(has_found=False, has_missing=True),
             })
             return {
-                "request_id": request_id, "status": "not_found",
+                "request_id": request_id, "status": response_status(has_found=False, has_missing=True),
                 "query": {"raw": raw_query, "type": "SPATIAL_RELATIONSHIP_BUFFER",
                           "reference_city": ref_city, "distance_km": distance_km},
                 "cities": [],
@@ -1066,7 +1063,7 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
     phase3_ms = (t3 - t2) * 1000
     total_ms  = (t3 - t0) * 1000
 
-    status = "complete" if cities else "not_found"
+    status = response_status(has_found=bool(cities), has_missing=not cities)
 
     log.info(SEPARATOR)
     log.info("DONE   │ [%s] spatial-operation status=%s  found=%d  %.0f ms",

@@ -97,23 +97,30 @@ def validate_spatial(params: QueryParams) -> QueryParams:
     db = SessionLocal()
     try:
         log.info("       │ Resolving %s via PostGIS ...", params.query_type)
+        unknown: List[str] = []
         if params.query_type == "SPATIAL_ADJACENCY":
-            params.spatial = _adjacency(params.spatial_relationship, db)
+            params.spatial, unknown = _adjacency(params.spatial_relationship, db)
         elif params.query_type == "SPATIAL_DIRECTION":
-            params.spatial = _direction(params.spatial_relationship, db)
+            params.spatial, unknown = _direction(params.spatial_relationship, db)
         elif params.query_type == "SPATIAL_DISTANCE":
-            params.spatial = _distance(params.spatial_relationship, db)
+            params.spatial, unknown = _distance(params.spatial_relationship, db)
+        params.unknown_states = unknown
+        if unknown:
+            log.warning("       │ UNKNOWN (no geometry anywhere, excluded from the "
+                        "candidate test): %s", unknown)
 
         # A question that named a subject asked a yes/no, not for a list. The
         # set that was just computed is the set for which the relationship
-        # holds, so the verdict is simply whether the subject is in it.
-        params.verdict = _verdict_for(params.spatial_relationship, params.spatial)
-        if params.verdict is not None:
+        # holds, so the verdict is simply whether the subject is in it - unless
+        # the subject itself is one of the unknown states, in which case there
+        # is no candidate set to have tested it against at all.
+        params.verdict = _verdict_for(params.spatial_relationship, params.spatial, unknown)
+        if params.spatial_relationship and params.spatial_relationship.subject:
             log.info("       │ Verdict: %s %s %s -> %s",
                      params.spatial_relationship.subject,
                      params.spatial_relationship.type,
                      params.spatial_relationship.refs,
-                     "YES" if params.verdict else "NO")
+                     "YES" if params.verdict else "NO" if params.verdict is False else "UNKNOWN")
         log.info("       │ Resolved to %d state(s): %s", len(params.spatial), params.spatial)
     finally:
         db.close()
@@ -121,22 +128,40 @@ def validate_spatial(params: QueryParams) -> QueryParams:
     return params
 
 
-def _verdict_for(rel: Optional[SpatialRelationship],
-                 qualifying: List[str]) -> Optional[bool]:
+def _verdict_for(rel: Optional[SpatialRelationship], qualifying: List[str],
+                 unknown: List[str]) -> Optional[bool]:
     """Yes/no for a question that named a subject, else None.
+
+    None also covers a case distinct from "no subject was named": the subject
+    was named, but its own geometry is held nowhere, so the relationship could
+    not be tested for it at all. A null input must not collapse into False -
+    Scenario 17's own reasoning ("a shape that is null must not be reported as
+    a false, since not knowing whether two states touch is a different answer
+    from knowing that they do not") - so that case is also reported as
+    unknown (None) rather than as a confident "no" the data cannot support.
+
+    The same applies if one of the *references* is unresolvable: the
+    candidate test can only run against states this computation actually knew
+    the shape of, so a reference with no geometry anywhere makes the whole
+    test undetermined, not a clean "no" for every subject.
 
     Matching is done on the normalised name so that a subject written as
     "München" is still recognised in a list holding the database's "Munich"."""
     if rel is None or not rel.subject:
         return None
+    normalized_unknown = {normalize_entity_name(name, "state") for name in unknown}
+    if any(normalize_entity_name(ref, "state") in normalized_unknown for ref in rel.refs):
+        return None
     subject = normalize_entity_name(rel.subject, "state")
+    if subject in normalized_unknown:
+        return None
     return any(subject == normalize_entity_name(name, "state") for name in qualifying)
 
 
-def _adjacency(rel: SpatialRelationship, db: Session) -> List[str]:
-    pairs, _ = _all_state_geometries(db)
+def _adjacency(rel: SpatialRelationship, db: Session) -> Tuple[List[str], List[str]]:
+    pairs, unknown = _all_state_geometries(db)
     if not pairs:
-        return []
+        return [], unknown
     cte, geom_params = _geoms_cte(pairs)
 
     sets: List[set] = []
@@ -158,20 +183,20 @@ def _adjacency(rel: SpatialRelationship, db: Session) -> List[str]:
         log.info("       │ States touching %s: %s", ref, sorted({r[0] for r in rows}))
 
     if not sets:
-        return []
+        return [], unknown
     result = sets[0]
     for s in sets[1:]:
         result &= s
-    return sorted(result)
+    return sorted(result), unknown
 
 
-def _direction(rel: SpatialRelationship, db: Session) -> List[str]:
+def _direction(rel: SpatialRelationship, db: Session) -> Tuple[List[str], List[str]]:
     ref  = rel.refs[0] if rel.refs else "Bayern"
     cond = _DIRECTION_SQL.get(rel.type, _DIRECTION_SQL["north_of"])
 
-    pairs, _ = _all_state_geometries(db)
+    pairs, unknown = _all_state_geometries(db)
     if not pairs:
-        return []
+        return [], unknown
     cte, geom_params = _geoms_cte(pairs)
 
     rows = db.execute(
@@ -191,7 +216,7 @@ def _direction(rel: SpatialRelationship, db: Session) -> List[str]:
         {**geom_params, "ref": ref},
     ).fetchall()
 
-    return [r[0] for r in rows]
+    return [r[0] for r in rows], unknown
 
 
 # City names are normalised through the gazetteer, which is built from the
@@ -251,9 +276,9 @@ def _resolve_city_coords(city: str, db: Session):
             log.info("       │ City resolved (partial): %r → %r lat=%s lng=%s", city, row[2], row[0], row[1])
             return row[0], row[1]
 
-    # Not held here — ask the peer before giving up. Whichever city this agent
-    # lacks a centroid for, without this step a distance query measured from
-    # it could not be answered even though the peer holds the point.
+    # Not held here — ask the peer before giving up. Agent-2 holds no centroid
+    # for Munich, so without this step a distance query measured from Munich
+    # could not be answered at all even though the peer has the point.
     log.info("       │ City %r not in local DB (tried: %s) — asking the peer", city, candidates)
     coords = _fetch_city_coords_from_peer(city)
     if coords:
@@ -308,7 +333,7 @@ def _parse_point_wkt(wkt: str) -> Optional[Tuple[float, float]]:
 # the threshold and, because only one agent had it, made the two agents give
 # different answers for a state sitting near the boundary.
 
-def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
+def _distance(rel: SpatialRelationship, db: Session) -> Tuple[List[str], List[str]]:
     # A missing reference or threshold makes the question unanswerable. Filling
     # either one in with a default would return a confident answer to a
     # question nobody asked, so the query is refused instead.
@@ -324,13 +349,18 @@ def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
 
     coords = _resolve_city_coords(raw_city, db)
     if coords is None:
-        log.warning("       │ Cannot resolve city %r — returning empty", raw_city)
-        return []
+        # Without the reference point nothing can be measured for any state -
+        # every state is unknown here, not "not within range" (Scenario 17's
+        # ternary reasoning: a missing input must not collapse into a false).
+        pairs, state_unknown = _all_state_geometries(db)
+        all_states = [name for name, _ in pairs] + state_unknown
+        log.warning("       │ Cannot resolve city %r — distance undetermined for all states", raw_city)
+        return [], all_states
 
     lat, lng = coords
-    pairs, _ = _all_state_geometries(db)
+    pairs, unknown = _all_state_geometries(db)
     if not pairs:
-        return []
+        return [], unknown
     cte, geom_params = _geoms_cte(pairs)
 
     rows = db.execute(
@@ -353,4 +383,4 @@ def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
 
     log.info("       │ States within %d km of %r : %s",
              int(dist_m / 1000), raw_city, [r[0] for r in rows])
-    return [r[0] for r in rows]
+    return [r[0] for r in rows], unknown

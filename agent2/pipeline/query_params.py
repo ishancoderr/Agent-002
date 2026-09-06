@@ -61,8 +61,16 @@ class QueryParams:
     attributes: List[str]
     spatial_relationship: Optional[SpatialRelationship] = None
     # Set only when the question named a subject, i.e. asked for a yes/no about
-    # one pair. None means the question asked for the set, not a verdict.
+    # one pair. None means either the question asked for the set, not a
+    # verdict, or the subject/reference has no geometry anywhere and the
+    # relationship genuinely could not be tested - see unknown_states.
     verdict: Optional[bool] = None
+    # States a relationship query (adjacency/direction/distance) could not
+    # test at all, because no geometry for them exists at either agent. Kept
+    # separate from the qualifying set in `spatial`: a state absent from the
+    # result because it doesn't qualify is a different fact from a state
+    # absent because it could never be checked.
+    unknown_states: List[str] = field(default_factory=list)
     raw_query: str = ""
     # GEOMETRY_LOOKUP only
     entities: Optional[List[Dict[str, str]]] = None
