@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import date
 from typing import Any, Dict, Tuple
 
 import openai
@@ -36,6 +37,10 @@ class QueryExtractor:
         A category with no template of its own falls back to the DIRECT_LOOKUP
         schema, which is the shape the rest of the pipeline can always use."""
         system_prompt = EXTRACT_TEMPLATES.get(query_type, EXTRACT_DIRECT_LOOKUP)
+        # Resolved fresh on every call rather than baked into the static
+        # template text, so "this year" always means the actual current year,
+        # not whatever year happened to be hardcoded when the prompt was written.
+        system_prompt += f"\n\nCURRENT_YEAR = {date.today().year}"
         response = self._client.chat.completions.create(
             model=self.model,
             max_tokens=MAX_TOKENS,

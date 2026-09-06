@@ -27,10 +27,6 @@ VALID_OPERATIONS = {"Union", "Intersection", "Difference", "SymDifference", "Buf
 VALID_ATTRS = {"population", "marriages", "live_births"}
 VALID_ENTITY_TYPES = {"city", "state"}
 
-MIN_YEAR = 1990
-MAX_YEAR = 2030
-DEFAULT_YEAR = 2021
-
 
 @dataclass
 class SpatialRelationship:

@@ -39,11 +39,11 @@ def resolve_geometries(
     try:
         for req in requests:
             entity_type = req.entity_type.value  # plain str, not the EntityType repr, for logging
-            wkt = _lookup(req.spatial_entity, entity_type, db, queries=queries)
+            wkt, matched_name, _exists = _lookup(req.spatial_entity, entity_type, db, queries=queries)
             if wkt:
                 log.info("       │ GEOM FOUND  : %s (%s) → %s…", req.spatial_entity, entity_type, wkt[:50])
                 found.append(FoundGeometrySlot(
-                    spatial_entity=req.spatial_entity,
+                    spatial_entity=matched_name,
                     entity_type=req.entity_type,
                     geometry=wkt,
                     srid=4326,
@@ -57,45 +57,91 @@ def resolve_geometries(
     return found, missing
 
 
-# City names are normalised through the gazetteer, which is built from the
-# name/alias JSON and verified against the database — see pipeline/gazetteer.py.
-# Private alias tables used to live here and in spatial_validator, pointing in
-# opposite directions; each produced names the database does not hold.
+def _lookup(entity_name: str, entity_type: str, db, queries: Optional[List[str]] = None):
+    """
+    Try to find the entity in the DB using multiple name forms:
+    1. Exact match
+    2. Alias (via the gazetteer, which is built from the name/alias JSON and
+       verified against the database — see pipeline/gazetteer.py; private
+       alias tables used to live here and in spatial_validator, pointing in
+       opposite directions, and each produced names the database does not
+       hold)
+    3. Case-insensitive ILIKE
+    Returns (wkt, matched_name, exists). `exists` is True whenever a row was
+    found under this entity_type - even one with a NULL geometry - which lets
+    a caller distinguish "this name has no row at all under this type" from
+    "this name exists here but its shape is missing". resolve_named_geometry
+    depends on that distinction: without it, a name that exists under both
+    tables (Berlin is both a city and a state) would fall through to the wrong
+    type the moment the correct one's shape is absent, silently returning a
+    city point in place of a missing state polygon. When `queries` is given,
+    every attempted SQL statement (values substituted, for readability) is
+    appended to it.
+    """
+    if entity_type not in ("city", "state"):
+        log.warning("       │ Unknown entity_type %r for %r — skipping", entity_type, entity_name)
+        return None, None, False
 
-
-def _lookup(entity: str, entity_type: str, db, queries: Optional[List[str]] = None) -> str | None:
-    if entity_type == "city":
-        candidates = list(dict.fromkeys(filter(None, [
-        normalize_entity_name(entity, "city"),   # the spelling the database uses
-        entity,                            # then the name as given
+    candidates = list(dict.fromkeys(filter(None, [
+        normalize_entity_name(entity_name, "city"),   # the spelling the database uses
+        entity_name,                                  # then the name as given
     ])))
-        for name in candidates:
-            sql = f"SELECT ST_AsText(centroid) FROM cities WHERE city_name = '{name}' LIMIT 1"
-            if queries is not None:
-                queries.append(sql)
-            row = db.execute(
-                text("SELECT ST_AsText(centroid) FROM cities WHERE city_name = :n LIMIT 1"),
-                {"n": name},
-            ).fetchone()
-            if row is not None:
-                log.info("       │ City resolved locally: %r → %r", entity, name)
-                return row[0]
-        log.info("       │ City %r not in local DB (tried: %s)", entity, candidates)
-        return None
 
-    elif entity_type == "state":
-        sql = f"SELECT ST_AsText(geo_shape) FROM states WHERE state_name = '{entity}' LIMIT 1"
+    table    = "cities" if entity_type == "city"  else "states"
+    col      = "centroid" if entity_type == "city" else "geo_shape"
+    name_col = "city_name" if entity_type == "city" else "state_name"
+
+    # 1 — exact match with valid geometry (alias first, then original)
+    for name in candidates:
+        sql = (f"SELECT ST_AsText({col}), {name_col} FROM {table} "
+               f"WHERE {name_col} = '{name}' AND ST_AsText({col}) IS NOT NULL LIMIT 1")
         if queries is not None:
             queries.append(sql)
         row = db.execute(
-            text("SELECT ST_AsText(geo_shape) FROM states WHERE state_name = :n LIMIT 1"),
-            {"n": entity},
+            text(f"""
+                SELECT ST_AsText({col}), {name_col} FROM {table}
+                WHERE {name_col} = :n AND ST_AsText({col}) IS NOT NULL
+                LIMIT 1
+            """),
+            {"n": name},
         ).fetchone()
-        return row[0] if row is not None else None
+        if row:
+            log.info("       │ Resolved (exact)  : %r → %r", entity_name, row[1])
+            return row[0], row[1], True
 
-    else:
-        log.warning("       │ Unknown entity_type %r for %r — skipping", entity_type, entity)
-        return None
+    # 2 — entity exists but geometry is NULL → stop here, do NOT fall through to partial
+    for name in candidates:
+        sql = f"SELECT 1 FROM {table} WHERE {name_col} = '{name}' LIMIT 1"
+        if queries is not None:
+            queries.append(sql)
+        exists = db.execute(
+            text(f"SELECT 1 FROM {table} WHERE {name_col} = :n LIMIT 1"),
+            {"n": name},
+        ).fetchone()
+        if exists:
+            log.info("       │ %s %r found in DB but geometry is NULL — will ask peer", entity_type, name)
+            return None, None, True
+
+    # 3 — entity not in DB at all: try case-insensitive full match with valid geometry
+    for name in candidates:
+        sql = (f"SELECT ST_AsText({col}), {name_col} FROM {table} "
+               f"WHERE {name_col} ILIKE '{name}' AND ST_AsText({col}) IS NOT NULL LIMIT 1")
+        if queries is not None:
+            queries.append(sql)
+        row = db.execute(
+            text(f"""
+                SELECT ST_AsText({col}), {name_col} FROM {table}
+                WHERE {name_col} ILIKE :n AND ST_AsText({col}) IS NOT NULL
+                LIMIT 1
+            """),
+            {"n": name},
+        ).fetchone()
+        if row:
+            log.info("       │ Resolved (ilike)  : %r → %r", entity_name, row[1])
+            return row[0], row[1], True
+
+    log.info("       │ %s %r not found in DB (tried: %s)", entity_type, entity_name, candidates)
+    return None, None, False
 
 
 # ── Buffer / within (Scenario 21: target that cannot be named) ──────────────
@@ -219,17 +265,39 @@ def resolve_named_geometry(
     name: str, entity_type: str, queries: Optional[List[str]] = None,
 ) -> Optional[Dict[str, object]]:
     """Look up a single named entity's geometry in the local catalogue.
-    Tries the given entity_type first, then the other one — a BufferWithin
-    reference is often a city while its targets are states (Scenario 20's own
-    setup: "which of NRW and Niedersachsen lie within 100 km of Dortmund"), so
-    a single declared entity_type for the whole operation isn't reliable per name.
-    Returns {"name": name, "wkt": ..., "srid": 4326} or None if not held here."""
+
+    The declared entity_type is tried first and is authoritative if the name
+    exists under it at all — even with a NULL geometry. Only when the name has
+    no row whatsoever under that type is a different one considered, which is
+    what lets a BufferWithin reference resolve as a city when the operation's
+    blanket entity_type was "state" (Scenario 20's own setup: "which of NRW
+    and Niedersachsen lie within 100 km of Dortmund" — Dortmund is a city, the
+    targets are states, one entity_type does not fit every name).
+
+    That same fallback must not fire for a genuine gap: Berlin is both a city
+    and a state, so a Berlin state polygon that is missing here would silently
+    resolve as Berlin's city point instead — the wrong feature entirely,
+    returned as if it were the state's territory — if type-guessing did not
+    stop the moment it learns the name exists under the type actually asked
+    for. Returns {"name": matched_name, "wkt": ..., "srid": 4326}, or None if
+    genuinely not held here under any applicable type."""
     db = SessionLocal()
     try:
-        for et in dict.fromkeys([entity_type, "city", "state"]):
-            wkt = _lookup(name, et, db, queries=queries)
-            if wkt:
-                return {"name": name, "wkt": wkt, "srid": 4326}
+        wkt, matched_name, exists = _lookup(name, entity_type, db, queries=queries)
+        if wkt is not None:
+            return {"name": matched_name, "wkt": wkt, "srid": 4326}
+        if exists:
+            # Found under the type that was actually asked for; its geometry
+            # is genuinely absent here. Ask the peer for THIS type, not a
+            # different feature that happens to share the name.
+            return None
+
+        for et in ("city", "state"):
+            if et == entity_type:
+                continue
+            wkt, matched_name, _exists = _lookup(name, et, db, queries=queries)
+            if wkt is not None:
+                return {"name": matched_name, "wkt": wkt, "srid": 4326}
         return None
     finally:
         db.close()

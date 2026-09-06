@@ -36,7 +36,7 @@ from .classifier import QueryClassifier
 from .clean_query import CleanQuery
 from .extractor import QueryExtractor
 from .gazetteer import GERMAN_STATES  # re-exported: query_controller imports it from here
-from .query_params import (DEFAULT_YEAR, MAX_YEAR, MIN_YEAR, QueryParams,
+from .query_params import (QueryParams,
                            RELATIONSHIP_TYPES, SpatialRelationship,
                            VALID_ATTRS, VALID_ENTITY_TYPES, VALID_OPERATIONS,
                            VALID_QUERY_TYPES)
@@ -70,22 +70,31 @@ def _sanitize_entities(raw: Any) -> List[Dict[str, str]]:
 
 def _years_from(data: Dict[str, Any]) -> List[int]:
     """The extraction prompts emit `temporal` as the full list of years, so a
-    range is already expanded. Values outside the stored range are dropped
-    rather than clamped: a query for 1800 should not silently become 1990."""
-    raw = data.get("temporal", [DEFAULT_YEAR])
+    range is already expanded.
+
+    A year the model actually extracted is used exactly as asked, never
+    rewritten to a different one. "What was Bayern's population in 1985?" is
+    a well-formed question even though neither agent's partition reaches that
+    far back; the honest answer is that nobody holds it, discovered the same
+    way any other gap is (the SQL lookup returns no row, the peer is asked,
+    the peer has none either, status resolves to not_found - Scenario 8).
+
+    An empty result here is not an error to paper over with a guess - it
+    means the query gave no year and implied none either (the extraction
+    prompt already resolves "now"/"this year" to a real number, so what
+    reaches this function empty is genuinely unspecified). The caller decides
+    whether that empty list is fatal: harmless for a pure spatial question,
+    but an incomplete request wherever attributes were actually asked for -
+    see the "no year, but data was requested" check in parse_query()."""
+    raw = data.get("temporal", [])
     if not isinstance(raw, list):
         raw = [raw]
     try:
-        years = sorted({int(year) for year in raw})
+        years = sorted({int(year) for year in raw if year is not None})
     except (TypeError, ValueError):
-        log.warning("       | Invalid temporal values %s - defaulting to [%d]", raw, DEFAULT_YEAR)
-        return [DEFAULT_YEAR]
-
-    in_range = [year for year in years if MIN_YEAR <= year <= MAX_YEAR]
-    if not in_range:
-        log.warning("       | No temporal values in range - defaulting to [%d]", DEFAULT_YEAR)
-        return [DEFAULT_YEAR]
-    return in_range
+        log.warning("       | Non-numeric temporal values %s - treating as unspecified", raw)
+        return []
+    return [year for year in years if 0 < year < 10000]
 
 
 def _attributes_from(data: Dict[str, Any], query_type: str) -> List[str]:
@@ -215,6 +224,19 @@ def parse_query(query: str) -> Tuple[QueryParams, int]:
     attributes = _attributes_from(data, query_type)
     if not attributes:
         log.info("       | Pure spatial question - no data attributes requested")
+
+    # Data was asked for but no year was named or implied. Guessing one
+    # (the system used to silently substitute 2021) answers a question the
+    # user never asked; rejecting outright and saying what is missing is the
+    # honest response, the same way an UNRELATED question is rejected rather
+    # than forced into a category it doesn't fit.
+    if attributes and not temporal:
+        log.warning("       | %s requested but no year was named or implied - rejecting",
+                    ", ".join(attributes))
+        return QueryParams(
+            query_type="NEEDS_YEAR", spatial=[], temporal=[], attributes=attributes,
+            raw_query=original_query, **_trace(),
+        ), tokens_consumed
 
     spatial = data.get("spatial", "all")
     if spatial == "all" or spatial is None or not isinstance(spatial, (str, list)):

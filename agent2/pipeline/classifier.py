@@ -25,7 +25,7 @@ from .query_params import VALID_QUERY_TYPES
 
 log = logging.getLogger("agent2.pipeline.classifier")
 
-CLASSIFY_MODEL = "gpt-4"
+CLASSIFY_MODEL = "gpt-4o-mini"
 
 
 CLASSIFY_SYSTEM = """\
@@ -166,10 +166,10 @@ EXAMPLES:
 
 
 def extract_json_object(raw: str) -> Dict[str, Any]:
-    """Best-effort JSON parse for models that do not support
-    response_format={"type": "json_object"} — classic gpt-4 among them. Strips
+    """Best-effort JSON parse, kept as a safety net even though the classify
+    call itself now requests response_format={"type": "json_object"}. Strips
     markdown fences and falls back to the first {...} block if the model
-    wrapped its answer in prose."""
+    wrapped its answer in prose regardless."""
     text = raw.strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -204,6 +204,7 @@ class QueryClassifier:
             model=self.model,
             max_tokens=20,
             temperature=0,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": CLASSIFY_SYSTEM},
                 {"role": "user", "content": query},

@@ -23,7 +23,12 @@ Valid attributes: population, marriages, live_births
 "temporal" is always a JSON array of every individual year being asked about, listed
 out in full — NOT a start/end pair. A range like "2019 to 2023" must be expanded into
 every year in that range: [2019,2020,2021,2022,2023]. A single year is still a
-one-element array: [2021]. If no year is mentioned default to [2021].
+one-element array: [2021]. If the query says "now", "current", "currently", "this
+year", "today", or similar, use CURRENT_YEAR (given below) — that is an actual year
+being asked about, not an assumption you are making. If the query names no year at
+all and implies none, leave this field an empty array: []. Never fill in a year the
+query did not ask about and did not imply — an empty array is the correct, honest
+answer when nothing indicates one.
 
 Output exactly this shape:
 {
@@ -66,9 +71,11 @@ Valid attributes: population, marriages, live_births
 
 "temporal" is always a JSON array of every individual year being asked about, listed
 out in full — NOT a start/end pair. A range like "2015-2024" must be expanded into every
-year in that range. A single year is still a one-element array: [2021]. If no year is
-mentioned default to [2021] — this default is harmless when "attributes" is empty, since
-no data lookup happens in that case.
+year in that range. A single year is still a one-element array: [2021]. If the query says
+"now", "current", "currently", "this year", "today", or similar, use CURRENT_YEAR (given
+below). If no year is named or implied, leave this field an empty array: [] — this is
+harmless when "attributes" is also empty, since no data lookup happens in that case, but
+must never be filled in with a year the query gave no basis for.
 
 Output exactly this shape:
 {

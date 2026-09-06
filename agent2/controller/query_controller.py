@@ -177,12 +177,12 @@ def _handle_geometry(params, raw_query: str, request_id: str,
                 "entity_type": e["entity_type"],
                 "wkt":         None,
                 "srid":        None,
-                "source":      "unavailable",
+                "source":      "not_found",
             })
 
     total_req = len(entities)
     if found_count == total_req:
-        status = "found"
+        status = "complete"
     elif found_count == 0:
         status = "not_found"
     else:
@@ -234,6 +234,11 @@ def _handle_geometry(params, raw_query: str, request_id: str,
             "entities": entities,
         },
         "geometries": geometries,
+        "summary": {
+            "total":    total_req,
+            "found":    found_count,
+            "missing":  total_req - found_count,
+        },
         "performance": {
             "phase1_ms": round(phase1_ms, 1),
             "phase2_ms": round(phase2_ms, 1),
@@ -307,6 +312,70 @@ def _handle_unrelated(params, raw_query: str, request_id: str, timestamp: str, t
     }
 
 
+def _handle_needs_year(params, raw_query: str, request_id: str, timestamp: str, t0: float, tokens_agent2: int):
+    """The query asked for data (population/marriages/live_births) but named
+    or implied no year. Guessing one used to mean a question about 1985
+    silently got answered with 2021's figures instead - a wrong answer with
+    nothing disclosing the swap. Rejecting and saying exactly what is missing
+    is the honest response, the same way an UNRELATED question is rejected
+    rather than forced into a category it doesn't fit."""
+    total_ms = (time.perf_counter() - t0) * 1000
+
+    log.info(SEPARATOR)
+    log.info("DONE   │ [%s] NEEDS_YEAR — rejected  %.0f ms", request_id, total_ms)
+    log.info(SEPARATOR)
+
+    log_evaluation_metrics({
+        "request_id":        request_id,
+        "timestamp":         timestamp,
+        "query":             raw_query,
+        "query_type":        "NEEDS_YEAR",
+        "classify_tokens":   params.classify_tokens,
+        "extract_tokens":    params.extract_tokens,
+        "extracted_data":    params.extracted_data,
+        "local_resolution": {
+            "note": "rejected before any local database lookup was attempted "
+                    "- no year was named or implied",
+        },
+        "kqml_exchanges":    [],
+        "phase1_ms":         total_ms,
+        "phase2_ms":         0.0,
+        "phase3_ms":         0.0,
+        "total_ms":          total_ms,
+        "tokens_agent2":     tokens_agent2,
+        "tokens_agent1":     0,
+        "tokens_total":      tokens_agent2,
+        "total_records":     0,
+        "total_data_points": 0,
+        "present_data_points": 0,
+        "missing_data_points": 0,
+        "complete_records":  0,
+        "partial_records":   0,
+        "empty_records":     0,
+        "status":            "rejected",
+    })
+
+    return {
+        "request_id": request_id,
+        "status":     "rejected",
+        "message": (
+            f"This question asks for {', '.join(params.attributes)} but doesn't say "
+            "which year. Add one to answer it, for example:\n"
+            f"  - a specific year: \"...in 2021\"\n"
+            f"  - a range: \"...from 2019 to 2023\"\n"
+            f"  - a relative reference: \"...this year\" or \"...now\""
+        ),
+        "query": {"raw": raw_query, "type": "NEEDS_YEAR", "attributes": params.attributes},
+        "performance": {
+            "phase1_ms": round(total_ms, 1),
+            "phase2_ms": 0.0,
+            "phase3_ms": 0.0,
+            "total_ms":  round(total_ms, 1),
+            "tokens": {"agent_2": tokens_agent2, "agent_1": 0, "total": tokens_agent2},
+        },
+    }
+
+
 @router.post("/query")
 def handle_query(body: UserQuery):  # no response_model — geometry branch returns a different shape
     t0        = time.perf_counter()
@@ -334,6 +403,10 @@ def handle_query(body: UserQuery):  # no response_model — geometry branch retu
     # ── Unrelated — reject before any DB lookup or KQML exchange ───────────────
     if params.query_type == "UNRELATED":
         return _handle_unrelated(params, body.query, request_id, timestamp, t0, tokens_agent2)
+
+    # ── Data was asked for but no year was named or implied ────────────────────
+    if params.query_type == "NEEDS_YEAR":
+        return _handle_needs_year(params, body.query, request_id, timestamp, t0, tokens_agent2)
 
     log.info("       │ Spatial    : %s", params.spatial)
     log.info("       │ Temporal   : %s", params.temporal)
@@ -644,6 +717,23 @@ def handle_query(body: UserQuery):  # no response_model — geometry branch retu
     )
 
 
+def _wkt_geometry_type(wkt: str) -> str:
+    """The leading word of a WKT string names its geometry type. A WKT string
+    always carries this - it is not extra work to read it, only to bother
+    checking - and it is the only way to tell a real overlap (POLYGON /
+    MULTIPOLYGON) from two shapes that merely touch (LINESTRING) or a pair
+    with no intersection at all (an empty collection). Two administrative
+    states sharing only a border, per Scenario 14, produce exactly this: a
+    geometrically correct result that is not an area, and looks identical to
+    a real shared region unless this is read out."""
+    if not wkt:
+        return "EMPTY"
+    return wkt.strip().split("(", 1)[0].strip().split()[0].upper()
+
+
+_AREA_GEOMETRY_TYPES = {"POLYGON", "MULTIPOLYGON"}
+
+
 def _handle_spatial_operation(params, raw_query: str, request_id: str,
                               timestamp: str, t0: float, tokens_agent2: int):
     """Scenarios 13-16 (Union/Intersection/Difference/SymDifference) and 20
@@ -753,12 +843,33 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
     try:
         if operation == "Union":
             result = fold_union([resolved[n] for n in names], queries=sql_queries)
-            payload = {"result": {"wkt": result["wkt"], "srid": result["srid"]}}
+            payload = {"result": {"wkt": result["wkt"], "srid": result["srid"],
+                                  "geometry_type": _wkt_geometry_type(result["wkt"])}}
         elif operation in ("Intersection", "Difference", "SymDifference"):
             # Order matters for Difference (first minus second); the other two
             # are symmetric, but the named order is preserved regardless.
             result = execute_operation(operation, resolved[names[0]], resolved[names[1]], queries=sql_queries)
-            payload = {"result": {"wkt": result["wkt"], "srid": result["srid"]}}
+            geometry_type = _wkt_geometry_type(result["wkt"])
+            payload = {"result": {"wkt": result["wkt"], "srid": result["srid"],
+                                  "geometry_type": geometry_type}}
+            if operation == "Intersection":
+                # A correct intersection can come back as a line (two states
+                # only touch) or empty (they don't touch at all) rather than a
+                # polygon (a real overlap) - Scenario 14's own example. All
+                # three are valid, complete answers; only the last one means
+                # any land is actually shared, so that reading is spelled out
+                # rather than left for the WKT prefix to imply.
+                has_area = geometry_type in _AREA_GEOMETRY_TYPES
+                payload["result"]["has_shared_area"] = has_area
+                if not has_area:
+                    payload["note"] = (
+                        f"{names[0]} and {names[1]} share no area"
+                        + (f" — they meet only along a boundary ({geometry_type})."
+                           if geometry_type in ("LINESTRING", "MULTILINESTRING")
+                           else " — their boundaries do not touch at all."
+                           if geometry_type in ("GEOMETRYCOLLECTION", "EMPTY", "POINT", "MULTIPOINT")
+                           else ".")
+                    )
         elif operation == "BufferWithin":
             ref = resolved[names[0]]
             targets = [resolved[n] for n in names[1:]]
