@@ -1,94 +1,20 @@
 """
-Build a KQML 'ask' message from gap slots, POST it to Agent 1,
-and parse the 'tell' response back into found/missing lists.
+Compatibility surface for the demographic KQML ask.
+
+Building and sending the message now lives in PeerClient (peer_client.py),
+which is the one place that knows how to reach the peer. This module keeps the
+original function name so the controller is unaffected by that move.
 """
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List
 
-import httpx
+from ..retrieval.local_store import GapSlot
+from .peer_client import PeerClient
 
-from kqml_messaging import MessageFactory, MissingSlot
-from kqml_messaging.serializers import JSONSerializer
-
-from .agent_registry import AGENT_REGISTRY
-from ..retrieval.gap_detector import GapSlot
-
-log = logging.getLogger("agent2.messaging.kqml_client")
-
-AGENT1_URL = AGENT_REGISTRY.get("Agent-1", "http://localhost:8000")
+_peer = PeerClient()
 
 
 def send_kqml_ask(gaps: List[GapSlot], request_id: str = "") -> Dict[str, Any]:
-    missing_slots: List[MissingSlot] = [
-        MessageFactory.missing_slot(
-            spatial=gap.spatial[0] if len(gap.spatial) == 1 else gap.spatial,
-            temporal=gap.temporal,
-            attributes=gap.attributes,
-        )
-        for gap in gaps
-    ]
-
-    msg = MessageFactory.ask(
-        sender="Agent-2",
-        receiver="Agent-1",
-        missing_slots=missing_slots,
-        reply_with=request_id or None,
-    )
-
-    payload = JSONSerializer.to_dict(msg)
-
-    total_missing_pts = sum(
-        len(gap.temporal) * len(gap.attributes) for gap in gaps
-    )
-    log.info("       │ Sending KQML ask to Agent-1")
-    log.info("       │ Required slots : %d", total_missing_pts)
-    log.info("       │ Posting to %s ...", AGENT1_URL)
-
-    response = httpx.post(
-        f"{AGENT1_URL}/kqml/receive",
-        json=payload,
-        timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0),
-    )
-    response.raise_for_status()
-    tell_payload = response.json()
-
-    tell = JSONSerializer.from_dict(tell_payload)
-
-    found: List[Dict] = []
-    still_missing: List[str] = []
-
-    for slot in tell.content.found_slots:
-        for record in slot.data:
-            flat = record.to_flat_dict()
-            found.append(flat)
-
-    for slot in tell.content.missing_slots:
-        s = slot.spatial
-        states = [s] if isinstance(s, str) else list(s)
-        still_missing.extend(states)
-
-    found_pts = sum(
-        len(v) for v in [
-            {k: v for k, v in r.items() if k not in ("spatial", "year")}
-            for r in found
-        ]
-    )
-    log.info("       │ Agent-1 filled : %d data points", found_pts)
-    if still_missing:
-        log.info("       │ Still missing  : %s", sorted(set(still_missing)))
-
-    tokens_agent1 = 0
-    if hasattr(tell, "metadata") and tell.metadata is not None:
-        tokens_agent1 = getattr(tell.metadata, "token_usage", 0) or 0
-
-    still_missing = list(dict.fromkeys(still_missing))
-
-    return {
-        "found": found,
-        "missing": still_missing,
-        "tokens_agent1": tokens_agent1,
-        "ask_message": payload,
-        "tell_message": tell_payload,
-    }
+    """Ask the peer for the values this agent could not fill."""
+    return _peer.ask_data(gaps, request_id=request_id)

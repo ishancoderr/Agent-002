@@ -427,12 +427,17 @@ def handle_query(body: UserQuery):  # no response_model — geometry branch retu
                 "type": params.query_type,
                 "relationship": {
                     "type":        rel.type if rel else None,
+                    "subject":     rel.subject if rel else None,
                     "refs":        rel.refs if rel else [],
                     "distance_km": rel.distance_km if rel else None,
                 },
             },
+            # A question that named a subject asked a yes/no. `verdict` carries
+            # it; `states` still carries the set it was read from, so the answer
+            # can be checked. Null when the question asked for the list instead.
+            "verdict": params.verdict,
             "states": states,
-            "summary": {"total": len(states)},
+            "summary": {"total": len(states), "verdict": params.verdict},
             "performance": {
                 "phase1_ms": round(total_ms, 1),
                 "phase2_ms": 0.0,

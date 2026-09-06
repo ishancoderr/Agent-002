@@ -1,0 +1,32 @@
+{
+  "states": [
+    "Baden-Württemberg",
+    "Bayern",
+    "Berlin",
+    "Brandenburg",
+    "Bremen",
+    "Hamburg",
+    "Hessen",
+    "Mecklenburg-Vorpommern",
+    "Niedersachsen",
+    "Nordrhein-Westfalen",
+    "Rheinland-Pfalz",
+    "Saarland",
+    "Sachsen",
+    "Sachsen-Anhalt",
+    "Schleswig-Holstein",
+    "Thüringen"
+  ],
+  "cities": {
+    "Munich": ["münchen", "muenchen", "munich"],
+    "Cologne": ["köln", "koeln", "cologne"],
+    "Nuremberg": ["nürnberg", "nuernberg", "nuremberg"],
+    "Düsseldorf": ["düsseldorf", "duesseldorf", "dusseldorf"],
+    "Frankfurt": ["frankfurt"],
+    "Stuttgart": ["stuttgart"],
+    "Hamburg": ["hamburg"],
+    "Dortmund": ["dortmund"],
+    "Berlin": ["berlin"],
+    "Bremen": ["bremen"]
+  }
+}

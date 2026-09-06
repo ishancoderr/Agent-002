@@ -14,6 +14,7 @@ from sqlalchemy import text
 from kqml_messaging import EntityType, MissingGeometrySlot, FoundGeometrySlot, MessageFactory, check_srid_agreement
 
 from ..database import SessionLocal
+from ..pipeline.gazetteer import normalize_entity_name
 
 log = logging.getLogger("agent2.retrieval.geometry_resolver")
 
@@ -56,26 +57,18 @@ def resolve_geometries(
     return found, missing
 
 
-_CITY_ALIASES: dict = {
-    "München": "Munich",
-    "Muenchen": "Munich",
-    "Cologne": "Köln",
-    "Köln": "Cologne",
-    "Koeln": "Cologne",
-    "Nürnberg": "Nuremberg",
-    "Nuernberg": "Nuremberg",
-    "Düsseldorf": "Dusseldorf",
-    "Duesseldorf": "Dusseldorf",
-}
+# City names are normalised through the gazetteer, which is built from the
+# name/alias JSON and verified against the database — see pipeline/gazetteer.py.
+# Private alias tables used to live here and in spatial_validator, pointing in
+# opposite directions; each produced names the database does not hold.
 
 
 def _lookup(entity: str, entity_type: str, db, queries: Optional[List[str]] = None) -> str | None:
     if entity_type == "city":
         candidates = list(dict.fromkeys(filter(None, [
-            entity,
-            _CITY_ALIASES.get(entity),
-            _CITY_ALIASES.get(entity.title()),
-        ])))
+        normalize_entity_name(entity, "city"),   # the spelling the database uses
+        entity,                            # then the name as given
+    ])))
         for name in candidates:
             sql = f"SELECT ST_AsText(centroid) FROM cities WHERE city_name = '{name}' LIMIT 1"
             if queries is not None:
@@ -119,9 +112,8 @@ def build_city_buffer(
     """Build a buffer polygon (metres) around a locally-held city's centroid.
     Returns {"ref_name", "wkt", "srid"} or None if the reference city isn't held here."""
     candidates = list(dict.fromkeys(filter(None, [
-        ref_city,
-        _CITY_ALIASES.get(ref_city),
-        _CITY_ALIASES.get(ref_city.title()),
+        normalize_entity_name(ref_city, "city"),   # the spelling the database uses
+        ref_city,                          # then the name as given
     ])))
     db = SessionLocal()
     try:
