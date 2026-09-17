@@ -22,7 +22,7 @@ from typing import Any, Dict, List
 
 import httpx
 
-from kqml_messaging import (EntityType, FoundGeometrySlot, MessageFactory,
+from kqml_messaging import (FoundGeometrySlot, MessageFactory,
                             MissingGeometrySlot, MissingSlot)
 from kqml_messaging.serializers import JSONSerializer
 
@@ -64,6 +64,7 @@ class PeerClient:
                     spatial=gap.spatial[0] if len(gap.spatial) == 1 else gap.spatial,
                     temporal=gap.temporal,
                     attributes=gap.attributes,
+                    entity_type=gap.entity_type or None,
                 )
                 for gap in gaps
             ],
@@ -93,7 +94,7 @@ class PeerClient:
         if still_missing:
             log.info("       | Still missing : %s", sorted(set(still_missing)))
 
-        return {"found": found, "missing": still_missing, "tokens_agent2": tokens,
+        return {"found": found, "missing": still_missing, "tokens_agent1": tokens,
                 "ask_message": ask_payload, "tell_message": tell_payload}
 
     def ask_geometry(self, slots: List[MissingGeometrySlot]) -> Dict[str, Any]:
@@ -112,11 +113,11 @@ class PeerClient:
         missing: List[MissingGeometrySlot] = list(tell.content.missing_geometries or [])
         for geometry in found:
             log.info("       | Geometry received : %s (%s) srid=%s  %.60s...",
-                     geometry.spatial_entity, geometry.entity_type.value,
+                     geometry.spatial_entity, geometry.entity_type,
                      geometry.srid, geometry.geometry)
         if missing:
             log.info("       | Still missing geometries: %s",
-                     [(m.spatial_entity, m.entity_type.value) for m in missing])
+                     [(m.spatial_entity, m.entity_type) for m in missing])
 
         return {"found": found, "missing": missing,
                 "ask_message": ask_payload, "tell_message": tell_payload}
@@ -128,7 +129,7 @@ class PeerClient:
         in either store. The exclusion list stops a city both agents hold from
         coming back twice."""
         spatial_query = MessageFactory.spatial_query(
-            topic="Within", geometry=wkt, target_entity=EntityType.CITY,
+            topic="Within", geometry=wkt, target_entity="city",
             srid=srid, exclude=exclude,
         )
         message = MessageFactory.ask_spatial_query(

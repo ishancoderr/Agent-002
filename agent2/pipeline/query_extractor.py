@@ -16,11 +16,16 @@ from typing import Any, Dict, Tuple
 
 import openai
 
-from .extraction_templates import EXTRACT_TEMPLATES, EXTRACT_DIRECT_LOOKUP
+from .prompt_loader import EXTRACT_TEMPLATES
 
 log = logging.getLogger("agent2.pipeline.extractor")
 
-EXTRACT_MODEL = "gpt-4o-mini"
+# Overridable per deployment via .env (see agent2/.env.example) — same
+# os.getenv(NAME, default) convention as DB_HOST etc. in database.py. A
+# single request can further override this via UserQuery.model, threaded
+# through parse_query() -> QueryExtractor(model=...); this env var only sets
+# what's used when a request doesn't ask for a specific model.
+EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "gpt-4o-mini")
 MAX_TOKENS = 600      # an "all states" geometry answer needs the room
 
 
@@ -28,15 +33,27 @@ class QueryExtractor:
     """Fills in one category's fields using that category's own prompt."""
 
     def __init__(self, client: openai.OpenAI | None = None, model: str = EXTRACT_MODEL):
+        """Reuse a passed-in OpenAI client, or make one from the env key.
+        `model` defaults to EXTRACT_MODEL but can be overridden per instance."""
         self._client = client or openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
         self.model = model
 
     def extract(self, query: str, query_type: str) -> Tuple[Dict[str, Any], int]:
         """Return (fields, tokens_used).
 
-        A category with no template of its own falls back to the DIRECT_LOOKUP
-        schema, which is the shape the rest of the pipeline can always use."""
-        system_prompt = EXTRACT_TEMPLATES.get(query_type, EXTRACT_DIRECT_LOOKUP)
+        `query_type` reaches here already validated by QueryClassifier — it's
+        always one of VALID_QUERY_TYPES, and UNRELATED never reaches
+        extraction (parse_query()/pipeline_main.run() short-circuit on it
+        first) — so every value here should already have a real template.
+        If one doesn't, that's a real bug (a category with no matching
+        config/prompts/*.yaml file), and guessing DIRECT_LOOKUP's prompt
+        would silently extract the wrong shape instead of surfacing it."""
+        if query_type not in EXTRACT_TEMPLATES:
+            raise ValueError(
+                f"No extraction template for query_type={query_type!r} — "
+                f"add one to config/prompts/ (see prompt_loader.py)."
+            )
+        system_prompt = EXTRACT_TEMPLATES[query_type]
         # Resolved fresh on every call rather than baked into the static
         # template text, so "this year" always means the actual current year,
         # not whatever year happened to be hardcoded when the prompt was written.

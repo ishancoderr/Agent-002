@@ -1,0 +1,109 @@
+# Stage-2 extraction prompt: SPATIAL_OPERATION.
+#
+# Prompt-specific content only — see config/prompts/direct_lookup.yaml for
+# the convention this follows. The "operations" list below is kept as five
+# whole bullets (name + description + trigger words together) rather than
+# split into separate name/description/trigger_words fields, matching how
+# entity_type_rules was done in geometry_lookup.yaml — decomposing further
+# is a loader-design question for when these files actually get wired in.
+#
+# `sections` is the render order — see agent1/pipeline/prompt_loader.py for
+# how each name there is turned into prompt text and assembled with the
+# other prompt files' sections into the final system prompt sent to the model.
+# Note "gazetteer" comes AFTER "operations" here, unlike the other templates
+# — that's the original prompt's own ordering, preserved via this file's own
+# `sections` list rather than a loader-wide fixed order.
+
+version: 1
+
+query_type: SPATIAL_OPERATION
+
+sections: [intro, operations, gazetteer, output_schema, output_notes, examples]
+
+gazetteer: [state, city]
+
+intro: 'You are extracting the details of a SPATIAL_OPERATION query for a geospatial statistics
+  system about German states/cities. This category builds a NEW shape out of two or more
+  NAMED entities, using exactly one of five operations. Return ONLY valid JSON (no markdown
+  fences).'
+
+operations_intro: 'THE FIVE OPERATIONS (there are only four ways to combine two shapes without the result
+  running off to infinity, plus the named-target buffer test):'
+
+operations:
+  - '"Union": one shape covering everything in either input. Order doesn''t matter.
+    Trigger words: union, combine, combined boundary, merge, dissolve.'
+  - '"Intersection": the shape covering only what both inputs share. Order doesn''t matter.
+    Trigger words: intersection, shared, overlap, in common.'
+  - '"Difference": the first named shape with the second one''s area removed from it.
+    ORDER MATTERS: "spatial":["Brandenburg","Berlin"] means Brandenburg minus Berlin, not
+    the other way around. Trigger words: difference, removed, minus, without, less.'
+  - '"SymDifference": the area covered by exactly one input, not both. Order doesn''t matter.
+    Trigger words: symmetric difference, in one or the other but not both, either...or...
+    but not both.'
+  - '"BufferWithin": tests which of several NAMED candidate entities lie within a distance
+    of a NAMED reference entity. Every candidate must be explicitly named in the query —
+    if the query asks about an un-named, open-ended set (e.g. plain "cities"), this is the
+    WRONG category; that case is classified differently upstream and never reaches this
+    template.'
+
+output_schema: |-
+  {
+    "operation": "Union" | "Intersection" | "Difference" | "SymDifference" | "BufferWithin",
+    "spatial": ["Bayern", "Sachsen"],
+    "entity_type": "state",
+    "distance_km": null
+  }
+
+output_notes: '"spatial" lists every named entity involved, in the order they appear in the query (this
+  order is significant for "Difference": the first entry is the shape being reduced). For
+  "BufferWithin", "spatial"[0] is the reference entity and the remaining entries are the
+  named candidates to test; set "distance_km" to the distance named in the query (default
+  100 if the operation is BufferWithin and none is given). For the other four operations
+  leave "distance_km" as null. "entity_type" is "state" unless every named entity is a city.'
+
+examples:
+  - query: "Give me one combined boundary for Bayern and Sachsen"
+    output: {operation: "Union", spatial: ["Bayern", "Sachsen"], entity_type: "state", distance_km: null}
+
+  - query: "Which area do Bayern and Sachsen share?"
+    output: {operation: "Intersection", spatial: ["Bayern", "Sachsen"], entity_type: "state", distance_km: null}
+
+  - query: "Give me Brandenburg with Berlin removed"
+    output: {operation: "Difference", spatial: ["Brandenburg", "Berlin"], entity_type: "state", distance_km: null}
+
+  - query: "Which areas lie in Bayern or Sachsen but not in both?"
+    output: {operation: "SymDifference", spatial: ["Bayern", "Sachsen"], entity_type: "state", distance_km: null}
+
+  - query: "Which of Nordrhein-Westfalen and Niedersachsen lie within 100 km of Dortmund?"
+    output: {operation: "BufferWithin", spatial: ["Dortmund", "Nordrhein-Westfalen", "Niedersachsen"], entity_type: "state", distance_km: 100}
+
+# Stage-3 examples for this category — the two shapes
+# agent1/retrieval/sql_generator.py's binary_operation()/intersects_buffer()
+# need once every named entity's own geometry has already been resolved
+# (through geometry_lookup.yaml's shapes) via ordinary SQL/PostGIS calls:
+# combining two already-known shapes (Union/Intersection/Difference/
+# SymDifference — the four ways operation names this category's own
+# extraction prompt above), and testing an already-known target shape
+# against a buffer around an already-known reference shape (BufferWithin's
+# named-candidate case — the open-ended case belongs to
+# spatial_relationship_buffer.yaml instead). Each request below names the
+# operation itself; four of these are the same SQL shape with only the
+# function name varying, so one cached statement per function name/entry.
+# See config/prompts/sql_generation.yaml for the shared rules.
+sql_generation:
+  examples:
+    - request: "The WKT text of the Union of two already-known geometries, each given as WKT text and its SRID. Use exactly :wkt_a and :srid_a for the first, exactly :wkt_b and :srid_b for the second. Alias the result column exactly as wkt."
+      output:
+        sql: "SELECT ST_AsText(ST_Union(ST_GeomFromText(:wkt_a, :srid_a), ST_GeomFromText(:wkt_b, :srid_b))) AS wkt"
+        params: {wkt_a: "POLYGON((...))", srid_a: 4326, wkt_b: "POLYGON((...))", srid_b: 4326}
+
+    - request: "The WKT text of the Difference of two already-known geometries (the first minus the second), each given as WKT text and its SRID. Use exactly :wkt_a and :srid_a for the first, exactly :wkt_b and :srid_b for the second. Alias the result column exactly as wkt."
+      output:
+        sql: "SELECT ST_AsText(ST_Difference(ST_GeomFromText(:wkt_a, :srid_a), ST_GeomFromText(:wkt_b, :srid_b))) AS wkt"
+        params: {wkt_a: "POLYGON((...))", srid_a: 4326, wkt_b: "POLYGON((...))", srid_b: 4326}
+
+    - request: "Whether an already-known target geometry intersects a buffer polygon (in metres) built around an already-known reference geometry, both given as WKT text and their own SRID. Use exactly :wkt_t and :srid_t for the target, exactly :wkt_ref and :srid_ref for the reference, and exactly :dist for the buffer distance in metres. Alias the result column exactly as meets_zone."
+      output:
+        sql: "SELECT ST_Intersects(ST_GeomFromText(:wkt_t, :srid_t), ST_Buffer(ST_GeomFromText(:wkt_ref, :srid_ref)::geography, :dist)::geometry) AS meets_zone"
+        params: {wkt_t: "POLYGON((...))", srid_t: 4326, wkt_ref: "POLYGON((...))", srid_ref: 4326, dist: 100000}

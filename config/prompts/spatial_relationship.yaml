@@ -1,0 +1,151 @@
+# Stage-2 extraction prompt: verdict-style spatial relationship queries
+# (adjacency, direction, distance) — shared by SPATIAL_ADJACENCY,
+# SPATIAL_DIRECTION and SPATIAL_DISTANCE.
+#
+# Prompt-specific content only — the valid attribute list and their aliases
+# ("married" -> "marriages", etc.) are not repeated here; they live once in
+# config/schema/attributes.yaml and are generated into the assembled prompt
+# at build time. See config/prompts/direct_lookup.yaml for that convention.
+#
+# subject_rules below uses a literal block (|-) rather than a plain quoted
+# string, because it contains a hand-aligned table of query -> subject/refs
+# examples. Folding it (as the other prose fields are) would collapse that
+# alignment into a run-on paragraph and make it harder for the model to read.
+#
+# `sections` is the render order — see agent1/pipeline/prompt_loader.py for
+# how each name there is turned into prompt text and assembled with the
+# other prompt files' sections into the final system prompt sent to the model.
+# attribute_rules is folded into the "attributes" section rather than listed
+# as its own section, since in the original prompt it was the third bullet
+# of the same "Valid attributes" list as the generated alias rules.
+
+version: 1
+
+query_type: [SPATIAL_ADJACENCY, SPATIAL_DIRECTION, SPATIAL_DISTANCE]
+
+sections: [intro, gazetteer, attributes, temporal_rules, output_schema, output_notes, subject_rules, examples]
+
+gazetteer: [state, city]
+attributes_entity: state
+
+intro: 'You are extracting the details of a verdict-style spatial relationship query (adjacency,
+  direction, or distance between German federal states) for a geospatial statistics
+  database. Return ONLY valid JSON (no markdown fences).'
+
+attribute_rules: 'Only include an attribute the query EXPLICITLY names. A pure spatial question
+  ("Which states are within 100 km of Dortmund?", "Which states touch Hessen?") asks
+  for the state list itself, not data — output "attributes": [] for it. Never invent
+  population or a year the user did not mention.'
+
+temporal_rules: '"temporal" is always a JSON array of every individual year being asked about, listed
+  out in full — NOT a start/end pair. A range like "2015-2024" must be expanded into every
+  year in that range. A single year is still a one-element array: [2021]. If the query says
+  "now", "current", "currently", "this year", "today", or similar, use CURRENT_YEAR (given
+  below). If no year is named or implied, leave this field an empty array: [] — this is
+  harmless when "attributes" is also empty, since no data lookup happens in that case, but
+  must never be filled in with a year the query gave no basis for.'
+
+output_schema: |-
+  {
+    "spatial": "all",
+    "temporal": [2021],
+    "attributes": [],
+    "spatial_relationship": {
+      "type": "adjacency" | "north_of" | "south_of" | "east_of" | "west_of" | "distance",
+      "subject": "Sachsen" or null,
+      "refs": ["Hessen", "Hamburg"],
+      "distance_km": 100
+    }
+  }
+
+output_notes: '"spatial" is always "all" — the actual state list gets resolved from the relationship, not
+  this field. "refs" holds the state/city name(s) the relationship is measured against.
+  "distance_km" is only set when the relationship type is "distance".'
+
+subject_rules: |-
+  "subject" is the one thing the question asks ABOUT, and it decides what kind of answer is
+  wanted:
+    - A yes/no question names one thing and asks whether it stands in the relationship to
+      another. Put that thing in "subject", and what it is measured against in "refs":
+        "Does Sachsen lie north of Bayern?"      subject "Sachsen", refs ["Bayern"]
+        "Do Bayern and Sachsen share a border?"  subject "Bayern",  refs ["Sachsen"]
+        "Is Sachsen within 100 km of Dortmund?"  subject "Sachsen", refs ["Dortmund"]
+    - A question asking WHICH states qualify wants the list, not a yes/no. Set "subject"
+      to null and put every named reference in "refs":
+        "Which states are north of Bayern?"            subject null, refs ["Bayern"]
+        "Which state borders both Hessen and Hamburg?" subject null, refs ["Hessen","Hamburg"]
+  Two names in "refs" with a null subject asks which states relate to ALL of them, which is
+  a different question from a yes/no about a pair.
+
+examples:
+  - query: "Which state borders both Hessen and Hamburg? Show population 2015-2024"
+    output: {spatial: "all", temporal: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024], attributes: ["population"], spatial_relationship: {type: "adjacency", subject: null, refs: ["Hessen", "Hamburg"], distance_km: null}}
+
+  - query: "Do Bayern and Sachsen share a border?"
+    output: {spatial: "all", temporal: [2021], attributes: [], spatial_relationship: {type: "adjacency", subject: "Bayern", refs: ["Sachsen"], distance_km: null}}
+
+  - query: "Which states are north of Bayern?"
+    output: {spatial: "all", temporal: [2021], attributes: [], spatial_relationship: {type: "north_of", subject: null, refs: ["Bayern"], distance_km: null}}
+
+  - query: "Does Sachsen lie north of Bayern?"
+    output: {spatial: "all", temporal: [2021], attributes: [], spatial_relationship: {type: "north_of", subject: "Sachsen", refs: ["Bayern"], distance_km: null}}
+
+  - query: "States north of Bayern, population and marriages 2020-2021"
+    output: {spatial: "all", temporal: [2020, 2021], attributes: ["population", "marriages"], spatial_relationship: {type: "north_of", subject: null, refs: ["Bayern"], distance_km: null}}
+
+  - query: "Which states are within 100 km of Dortmund?"
+    output: {spatial: "all", temporal: [2021], attributes: [], spatial_relationship: {type: "distance", subject: null, refs: ["Dortmund"], distance_km: 100}}
+
+  - query: "Is Sachsen within 100 km of Dortmund?"
+    output: {spatial: "all", temporal: [2021], attributes: [], spatial_relationship: {type: "distance", subject: "Sachsen", refs: ["Dortmund"], distance_km: 100}}
+
+# Stage-3 examples for this category — the shapes
+# agent1/pipeline/spatial_validator.py needs to turn adjacency/direction/
+# distance into a candidate state list via PostGIS. Every state's geometry
+# (not just the ones named) has to be tested, since a state with no shape
+# must be excluded from the candidate set rather than silently vanish from
+# it (see spatial_validator.py's own comment on why) — so these queries take
+# the FULL set of (name, WKT) pairs already resolved in Python (locally
+# held, or fetched from the peer for this computation only) as two array
+# parameters, and turn them into rows with unnest() inside a CTE, rather
+# than one placeholder pair per state — that shape never changes size no
+# matter how many states are actually being tested, so it can be generated
+# once and reused, unlike a query with one :name0/:wkt0, :name1/:wkt1, ...
+# pair per row. See config/prompts/sql_generation.yaml for the shared rules,
+# including the CTE-naming rule this depends on.
+sql_generation:
+  examples:
+    - request: "The name and WKT text of every federal state's own geometry, straight from the state table, no filtering. Alias the name column exactly as entity_name and the WKT column exactly as wkt."
+      output:
+        sql: "SELECT state_name AS entity_name, ST_AsText(geo_shape) AS wkt FROM states"
+        params: {}
+
+    - request: "Given the full set of federal states' own (name, WKT) pairs as two parallel array parameters, which of them touch (share a border with, but are not identical to) a given reference state name. Use exactly :names for the array of names, exactly :wkts for the array of matching WKT text, and exactly :ref for the reference state's name. Build a CTE named exactly geoms with columns entity_name and shape from unnest(:names, :wkts), self-join it to compare every pair, and require ST_Intersects true while ST_Equals is false so a state is never reported as touching itself. Alias the result column exactly as entity_name."
+      output:
+        sql: "WITH geoms(entity_name, shape) AS (SELECT entity_name, ST_GeomFromText(wkt, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(entity_name, wkt)) SELECT g2.entity_name FROM geoms g1 JOIN geoms g2 ON ST_Intersects(g1.shape, g2.shape) AND NOT ST_Equals(g1.shape, g2.shape) WHERE g1.entity_name = :ref AND g2.entity_name != :ref"
+        params: {names: ["Bayern", "Sachsen"], wkts: ["POLYGON((...))", "POLYGON((...))"], ref: "Bayern"}
+
+    - request: "Given the full set of federal states' own (name, WKT) pairs as two parallel array parameters, which of them lie north of a given reference state's centroid (compass bearing at most 45 degrees or at least 315 degrees from the reference's centroid), nearest bearing first. Use exactly :names for the array of names, exactly :wkts for the array of matching WKT text, and exactly :ref for the reference state's name. Build a CTE named exactly geoms with columns entity_name and shape from unnest(:names, :wkts), then a second CTE named exactly azimuths with its own explicit columns entity_name and az computing each other state's compass bearing in degrees from the reference's centroid to its own centroid, then filter and order by that bearing. Alias the result column exactly as entity_name."
+      output:
+        sql: "WITH geoms(entity_name, shape) AS (SELECT entity_name, ST_GeomFromText(wkt, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(entity_name, wkt)), azimuths(entity_name, az) AS (SELECT g2.entity_name, degrees(ST_Azimuth(ST_Centroid(g1.shape), ST_Centroid(g2.shape))) FROM geoms g1 JOIN geoms g2 ON g1.entity_name != g2.entity_name WHERE g1.entity_name = :ref) SELECT entity_name FROM azimuths WHERE (az <= 45 OR az >= 315) ORDER BY az"
+        params: {names: ["Bayern", "Sachsen"], wkts: ["POLYGON((...))", "POLYGON((...))"], ref: "Bayern"}
+
+    - request: "Given the full set of federal states' own (name, WKT) pairs as two parallel array parameters, which of them lie within a given distance (in metres) of a given reference point (longitude/latitude), nearest first. Use exactly :names for the array of names, exactly :wkts for the array of matching WKT text, exactly :lng and :lat for the reference point, and exactly :dist for the distance in metres. Build a CTE named exactly geoms with columns entity_name and shape from unnest(:names, :wkts), filter with ST_DWithin against the point (cast both sides to geography) and order by ST_Distance the same way. Alias the result column exactly as entity_name."
+      output:
+        sql: "WITH geoms(entity_name, shape) AS (SELECT entity_name, ST_GeomFromText(wkt, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(entity_name, wkt)) SELECT entity_name FROM geoms WHERE ST_DWithin(shape::geography, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography, :dist) ORDER BY ST_Distance(shape::geography, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography)"
+        params: {names: ["Bayern", "Sachsen"], wkts: ["POLYGON((...))", "POLYGON((...))"], lng: 7.4653, lat: 51.5136, dist: 100000}
+
+    - request: "The (latitude, longitude) of the city whose name exactly equals a given value. Use exactly :name for the name to match. Alias the latitude column exactly as lat and the longitude column exactly as lng."
+      output:
+        sql: "SELECT lat AS lat, lng AS lng FROM cities WHERE city_name = :name LIMIT 1"
+        params: {name: "Dortmund"}
+
+    - request: "The matched name, latitude and longitude of the city whose name case-insensitively equals a given value. Use exactly :name for the value to match against. Alias the matched name column exactly as entity_name, the latitude column exactly as lat, and the longitude column exactly as lng."
+      output:
+        sql: "SELECT city_name AS entity_name, lat AS lat, lng AS lng FROM cities WHERE city_name ILIKE :name LIMIT 1"
+        params: {name: "dortmund"}
+
+    - request: "The matched name, latitude and longitude of the city whose name contains a given value (partial, case-insensitive match), shortest matching name first. Use exactly :name for the value to search for (already wrapped in %...% wildcards). Alias the matched name column exactly as entity_name, the latitude column exactly as lat, and the longitude column exactly as lng."
+      output:
+        sql: "SELECT city_name AS entity_name, lat AS lat, lng AS lng FROM cities WHERE city_name ILIKE :name ORDER BY LENGTH(city_name) LIMIT 1"
+        params: {name: "%dort%"}

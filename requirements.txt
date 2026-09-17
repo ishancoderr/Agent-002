@@ -6,4 +6,7 @@ httpx==0.27.2
 openai>=1.30.0
 python-dotenv==1.0.1
 pydantic>=2.0
+sqlglot>=30.0
+# needs >= 2.3.0. A direct URL cannot carry a version specifier (PEP 508),
+# so the minimum is enforced at startup instead - see main.py's _check_library_version.
 kqml-messaging @ git+https://github.com/ishancoderr/kqml-geo.git

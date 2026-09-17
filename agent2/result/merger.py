@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from ..retrieval.gap_detector import DataRecord
+from ..retrieval.local_store import DataRecord
 
 log = logging.getLogger("agent2.result.merger")
 
@@ -39,7 +39,7 @@ def merge_results(
             log.info("       │ [Agent-1 new ] %s %s → %s", state, year, attrs)
 
     if requested_states and requested_years and requested_attrs:
-        from ..retrieval.gap_detector import ALL_STATES
+        from ..retrieval.local_store import ALL_STATES
         states = ALL_STATES if "all" in requested_states else requested_states
         for state in states:
             for year in requested_years:

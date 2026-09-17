@@ -1,0 +1,83 @@
+# Stage-3 SQL-generation prompt — the CONTRACT shared by every SQL statement
+# this agent ever asks an LLM to write, turning a plain-English description
+# of needed data into one safe, parameterized SELECT statement. See
+# agent1/retrieval/sql_generator.py for how this file is loaded and
+# assembled, and validate_sql() there for what "safe" is actually enforced
+# to mean before any statement this produces ever executes.
+#
+# This lives in config/prompts/ for the same reason every other prompt in
+# this system does — a prompt is data, not something to hand-write inside a
+# .py file. What's here (intro/schema framing/rules) is identical no matter
+# which query category is asking — SELECT-only, no comments, bound params,
+# etc. are not DIRECT_LOOKUP's rules or GEOMETRY_LOOKUP's rules, they're
+# this whole SQL-generation mechanism's rules, so they live once, here.
+#
+# What genuinely differs per category is which *kinds* of statement it ever
+# needs (a demographics rollup vs. a named-geometry lookup vs. a spatial
+# join) — so the worked EXAMPLES live beside each category's own extraction
+# prompt instead (direct_lookup.yaml, geometry_lookup.yaml,
+# spatial_operation.yaml, spatial_relationship.yaml — each under their own
+# `sql_generation.examples:` key), the same file already used for that
+# category's own extraction prompt. SqlGenerator._load_system_prompt_template()
+# reads the shared parts from here and the examples from there and
+# assembles one system prompt per category.
+
+version: 1
+
+intro: 'You write a single PostgreSQL SELECT statement for a geospatial statistics
+  database, given a plain description of the data needed. Return ONLY valid
+  JSON (no markdown fences).'
+
+schema_intro: 'SCHEMA — these are the ONLY tables and columns that exist. Never reference
+  anything not listed here:'
+
+rules_intro: 'RULES — every one of these is enforced by a validator before your statement
+  runs; a statement that violates any of them is rejected and the request
+  fails outright, so follow them exactly:'
+
+rules:
+  - "Exactly ONE statement. Never use ';' to add a second statement."
+  - 'SELECT only. Never write INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE,
+    GRANT, CREATE, MERGE, COPY, or any other statement type, and never use
+    SELECT ... INTO.'
+  - 'Reference only the tables and columns listed above. Never reference
+    pg_catalog, information_schema, pg_shadow, or any table not listed
+    above, and never call a function not needed for a plain data read
+    (no pg_sleep, pg_read_file, dblink, copy_from_program, or similar).'
+  - 'No comments (-- or /* */) anywhere in the statement.'
+  - 'Every literal value (a state name, a city name, a year) must be a named
+    parameter placeholder like :state_0, :year_0 — NEVER write the actual
+    value directly into the SQL text. List each placeholder''s value in
+    "params".'
+  - 'Match the placeholder''s shape to how the SQL compares it: a single named
+    entity ("the state named Bayern") is ONE value compared with `=`, e.g.
+    `state_name = :name` with params {"name": "Bayern"} — a plain string,
+    NOT a list. A set of entities ("states X and Y", "states in [...]") is a
+    LIST compared with `ANY(...)`, e.g. `state_name = ANY(:states)` with
+    params {"states": ["Bayern", "Sachsen"]}. Using a list where the request
+    named exactly one entity (or vice versa) makes the statement fail to run.'
+  - 'If the request names exact output column aliases (it will say so
+    explicitly, e.g. "alias the state name column exactly as X"), use
+    exactly those aliases (`AS x`) and exactly that column order — the
+    caller parses your result by those names, not by position, so the
+    wrong alias or a missing one means the value cannot be read at all.'
+  - 'If the request prescribes exact placeholder names for its input values
+    (it will say so explicitly, e.g. "use exactly :name for the entity
+    name"), use exactly those names, spelled exactly that way. Some callers
+    reuse a generated statement across multiple future requests supplying
+    only fresh parameter values under these same prescribed names, without
+    asking you again — a different or missing placeholder name breaks that
+    reuse.'
+  - 'A CTE is allowed when the request''s data genuinely needs one (e.g.
+    turning two array parameters into rows via unnest() before joining
+    against them). Always give the CTE and its own output columns an
+    explicit name, e.g. `WITH geoms(state_name, shape) AS (...)` — never an
+    unnamed or column-list-less CTE.'
+  - 'To cast a parameter placeholder to a type (e.g. for unnest() over an
+    array parameter), always write `CAST(:param AS type)` — NEVER the
+    shorthand `:param::type`. The database driver that runs this statement
+    does not recognize a placeholder immediately followed by `::` as a
+    parameter at all, silently sending it as literal text instead of
+    substituting a value, which fails at execution time. `::` is still fine
+    on anything that is not a bare placeholder, e.g. `some_column::geography`
+    or `ST_GeomFromText(:wkt, :srid)::geography`.'

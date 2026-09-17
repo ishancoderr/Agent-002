@@ -1,0 +1,66 @@
+# Attribute tables — the measured values hanging off an entity type.
+#
+# One entry per table. `entity` says which entity type the rows describe, and
+# `join_column` is the foreign key back to that entity's id_column.
+#
+# `period_column` is the temporal dimension — the T of the (spatial, temporal,
+# thematic) gap signature. Set it to null for values simply not measured per
+# year; a road's lane count has no year, and pretending otherwise invents a
+# dimension the data does not have.
+#
+# `aliases` replace prompt rules that used to be written by hand ("married",
+# "marriage", "marriages" -> always output "marriages"). Listed here, the rule
+# is generated into the prompt instead of maintained in two places.
+
+version: 1
+
+attribute_tables:
+
+  - table:         state_demographics
+    entity:        state
+    join_column:   state_id
+    period_column: stat_year
+    columns:
+      population:
+        label:   "population"
+        type:    integer
+        aliases: [people, inhabitants, residents]
+      marriages:
+        label:   "marriages"
+        type:    integer
+        aliases: [married, marriage]
+      live_births:
+        label:   "live births"
+        type:    integer
+        aliases: [births, "live birth", live_birth]
+
+  - table:         river_measurements
+    entity:        river
+    join_column:   river_id
+    period_column: measure_year
+    columns:
+      length_km:
+        label:   "length"
+        type:    float
+        unit:    "km"
+        aliases: [length, "length in km", "how long"]
+
+# ── Attributes with no year ──────────────────────────────────────────────────
+#
+#   - table:         road_facts
+#     entity:        road
+#     join_column:   road_id
+#     period_column: null               # <- these values have no period
+#     columns:
+#       lane_count: {label: "lane count", type: integer}
+#
+# period_column: null needs one library change first. DataRecord currently
+# declares `year: int` as required, so a value with no year cannot be carried
+# in a KQML message at all. Until that is relaxed, only temporal attributes
+# will round-trip between the agents.
+#
+# ── Why these column names are safe ──────────────────────────────────────────
+# Column names from this file are interpolated into SQL, so they are gated
+# twice: checked against information_schema at startup, and checked against
+# this whitelist again before a statement is built. Values are always bound
+# parameters, never interpolated. Never populate this file from user input.

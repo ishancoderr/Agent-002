@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 import httpx
 
-from kqml_messaging import EntityType, MessageFactory, MissingGeometrySlot, FoundGeometrySlot
+from kqml_messaging import MessageFactory, MissingGeometrySlot, FoundGeometrySlot
 from kqml_messaging.serializers import JSONSerializer
 
 from .agent_registry import AGENT_REGISTRY
@@ -43,7 +43,7 @@ def send_kqml_geometry_ask(
 
     log.info("       │ Sending geometry ask to Agent-1 (%d feature(s))", len(missing_geometries))
     for g in missing_geometries:
-        log.info("       │   %s  type=%s", g.spatial_entity, g.entity_type.value)
+        log.info("       │   %s  type=%s", g.spatial_entity, g.entity_type)
 
     response = httpx.post(
         f"{AGENT1_URL}/kqml/receive",
@@ -60,9 +60,9 @@ def send_kqml_geometry_ask(
 
     log.info("       │ Agent-1 geometry reply: found=%d  missing=%d", len(found), len(missing))
     for f in found:
-        log.info("       │   FOUND   %s (%s) srid=%d  %s…", f.spatial_entity, f.entity_type.value, f.srid, f.geometry[:40])
+        log.info("       │   FOUND   %s (%s) srid=%d  %s…", f.spatial_entity, f.entity_type, f.srid, f.geometry[:40])
     for m in missing:
-        log.info("       │   MISSING %s (%s)", m.spatial_entity, m.entity_type.value)
+        log.info("       │   MISSING %s (%s)", m.spatial_entity, m.entity_type)
 
     return {"found": found, "missing": missing, "ask_message": payload, "tell_message": tell_payload}
 
@@ -74,7 +74,7 @@ def send_kqml_city_buffer_ask(wkt: str, srid: int, exclude: List[str]) -> Dict[s
     be named in advance. Returns {"found": List[FoundGeometrySlot]}.
     """
     sq = MessageFactory.spatial_query(
-        topic="Within", geometry=wkt, target_entity=EntityType.CITY, srid=srid, exclude=exclude,
+        topic="Within", geometry=wkt, target_entity="city", srid=srid, exclude=exclude,
     )
     msg = MessageFactory.ask_spatial_query(sender="Agent-2", receiver="Agent-1", spatial_query=sq)
     payload = JSONSerializer.to_dict(msg)

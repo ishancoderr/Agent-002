@@ -1,0 +1,70 @@
+# Stage-2 extraction prompt: SPATIAL_RELATIONSHIP_BUFFER.
+#
+# Prompt-specific content only — see config/prompts/direct_lookup.yaml for
+# the convention this follows. This category has no attributes/temporal
+# fields at all, so there's nothing here to defer to attributes.yaml.
+#
+# `sections` is the render order — see agent1/pipeline/prompt_loader.py for
+# how each name there is turned into prompt text and assembled with the
+# other prompt files' sections into the final system prompt sent to the model.
+
+version: 1
+
+query_type: SPATIAL_RELATIONSHIP_BUFFER
+
+sections: [intro, gazetteer, output_schema, output_notes, examples]
+
+gazetteer: [city]
+
+intro: 'You are extracting the details of a SPATIAL_RELATIONSHIP_BUFFER query for a geospatial
+  statistics system about German cities. This category is a buffer-and-test query over an
+  OPEN-ENDED target type: it asks which CITIES lie within some distance of a named
+  reference city, where the target cities cannot be named in advance since they are the
+  answer. Return ONLY valid JSON (no markdown fences).'
+
+output_schema: |-
+  {
+    "spatial": ["Dortmund"],
+    "operations": ["Buffer", "Within"],
+    "distance_km": 100,
+    "target_entity": "city"
+  }
+
+output_notes: '"spatial" holds the single reference city the distance is measured from. "operations" is
+  always ["Buffer", "Within"] for this category. "distance_km" is the distance in
+  kilometres named in the query (default 100 if unspecified). "target_entity" is always
+  "city". Do not include attributes or temporal fields.'
+
+examples:
+  - query: "Which cities lie within 100 km of Dortmund?"
+    output: {spatial: ["Dortmund"], operations: ["Buffer", "Within"], distance_km: 100, target_entity: "city"}
+
+  - query: "What cities are within 50 km of München?"
+    output: {spatial: ["München"], operations: ["Buffer", "Within"], distance_km: 50, target_entity: "city"}
+
+# Stage-3 examples for this category — the three shapes
+# agent1/retrieval/sql_generator.py's city_buffer()/point_buffer()/
+# cities_within_buffer() need for the open-ended "which cities lie within
+# X km of Y" test: a metres-radius buffer built around a NAMED city held
+# here, the same buffer built around an already-resolved point (no local
+# row required — used when the reference city itself came from the peer),
+# and testing the local cities catalogue against an arbitrary buffer
+# polygon. Each is generated once and reused — see config/prompts/
+# sql_generation.yaml for the shared rules and the placeholder-naming rule
+# this depends on.
+sql_generation:
+  examples:
+    - request: "The matched name, the WKT text of a buffer polygon (in metres) around the centroid of the city whose name exactly equals a given value, and that geometry's SRID — only if the city has a non-null centroid. Use exactly :name for the name to match and exactly :dist for the buffer distance in metres. Alias the matched name column exactly as entity_name, the buffer WKT column exactly as wkt, and the SRID column exactly as srid."
+      output:
+        sql: "SELECT city_name AS entity_name, ST_AsText(ST_Buffer(centroid::geography, :dist)::geometry) AS wkt, ST_SRID(centroid) AS srid FROM cities WHERE city_name = :name AND centroid IS NOT NULL LIMIT 1"
+        params: {name: "Dortmund", dist: 100000}
+
+    - request: "The WKT text of a buffer polygon (in metres) around an already-known point geometry, given as WKT text and its SRID. Use exactly :wkt for the point's WKT text, exactly :srid for its SRID, and exactly :dist for the buffer distance in metres. Alias the result column exactly as wkt."
+      output:
+        sql: "SELECT ST_AsText(ST_Buffer(ST_GeomFromText(:wkt, :srid)::geography, :dist)::geometry) AS wkt"
+        params: {wkt: "POINT(7.4653 51.5136)", srid: 4326, dist: 100000}
+
+    - request: "The name, WKT text and SRID of every city in the local cities catalogue whose centroid lies within an already-known buffer polygon (given as WKT text and its SRID), excluding a given list of names. Use exactly :wkt for the polygon's WKT text, exactly :srid for its SRID, and exactly :exclude for the list of names to exclude. Alias the name column exactly as entity_name, the WKT column exactly as wkt, and the SRID column exactly as srid."
+      output:
+        sql: "SELECT city_name AS entity_name, ST_AsText(centroid) AS wkt, ST_SRID(centroid) AS srid FROM cities WHERE centroid IS NOT NULL AND ST_Within(centroid, ST_GeomFromText(:wkt, :srid)) AND NOT (city_name = ANY(:exclude))"
+        params: {wkt: "POLYGON((...))", srid: 4326, exclude: ["Dortmund"]}

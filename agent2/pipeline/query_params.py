@@ -10,7 +10,10 @@ no stage has to import another stage just to know what a query looks like.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import yaml
 
 # The eight categories a query can be classified into. Seven are answerable
 # and map onto the document's scenarios; UNRELATED is the refusal.
@@ -23,9 +26,92 @@ VALID_QUERY_TYPES = {
 # shape (a spatial_relationship object).
 RELATIONSHIP_TYPES = {"SPATIAL_ADJACENCY", "SPATIAL_DIRECTION", "SPATIAL_DISTANCE"}
 
+# The four ways to combine two shapes, plus the named-target buffer test — see
+# config/prompts/spatial_operation.yaml's own comment for why there are
+# exactly five. Not sourced from config/schema: unlike VALID_ATTRS and
+# VALID_ENTITY_TYPES below, no config file declares this as structured data
+# (spatial_operation.yaml only mentions each name inside prose), so there is
+# nothing here to deduplicate against.
 VALID_OPERATIONS = {"Union", "Intersection", "Difference", "SymDifference", "BufferWithin"}
-VALID_ATTRS = {"population", "marriages", "live_births"}
-VALID_ENTITY_TYPES = {"city", "state"}
+
+_SCHEMA_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "schema"
+
+# Every attribute column declared across every table in attributes.yaml — a
+# query's extracted attribute names are checked against this, not a
+# hardcoded {"population", "marriages", "live_births"} that would silently
+# fall out of sync the moment a table there gains or loses a column.
+_ATTRIBUTE_TABLES = yaml.safe_load(
+    (_SCHEMA_DIR / "attributes.yaml").read_text(encoding="utf-8")
+)["attribute_tables"]
+VALID_ATTRS = {column for table in _ATTRIBUTE_TABLES for column in table["columns"]}
+
+# Every enabled entity type declared in entities.yaml — same reasoning: this
+# used to be a hardcoded {"city", "state"} that entities.yaml's own "adding
+# an entity type needs no Python changes" promise didn't actually hold for.
+_ENTITIES_DOC = yaml.safe_load((_SCHEMA_DIR / "entities.yaml").read_text(encoding="utf-8"))
+_ENTITIES = _ENTITIES_DOC["entities"]
+VALID_ENTITY_TYPES = {name for name, spec in _ENTITIES.items() if spec.get("enabled", True)}
+
+# The entity type assumed whenever a query doesn't determine one of its own —
+# entities.yaml's own `ambiguous_name_default` (the same value gazetteer.py
+# resolves an ambiguous name like "Berlin" to when a query names it without
+# saying city or state). Reused here rather than a second, separately-typed
+# "state" fallback: DIRECT_LOOKUP's extraction prompt has no entity_type
+# field of its own yet (see config/prompts/direct_lookup.yaml), so
+# agent2/retrieval/local_store.py falls back to this exact same config value
+# instead of a Python literal, for the same reason gazetteer.py does.
+DEFAULT_ENTITY_TYPE = _ENTITIES_DOC.get("ambiguous_name_default")
+
+
+def default_attribute_for(entity_type: str) -> str:
+    """The attribute a DIRECT_LOOKUP query defaults to when it names none
+    that validates — a data lookup needs at least one attribute to answer,
+    but guessing which one must not mean assuming every entity's default is
+    state's "population". This is the first column declared under
+    `entity_type`'s own attribute table(s) in config/schema/attributes.yaml,
+    so a new entity's own default comes from its own schema, not a copy of
+    another entity's."""
+    for table in _ATTRIBUTE_TABLES:
+        if table["entity"] == entity_type:
+            return next(iter(table["columns"]))
+    raise KeyError(
+        f"No attribute_tables entry for entity={entity_type!r} in attributes.yaml — "
+        f"cannot default an attribute for an entity with no attributes at all."
+    )
+
+
+def _joined(items: List[str]) -> str:
+    """"a, b and c" — plain English list joining, used only by
+    system_capabilities_description() below."""
+    if len(items) <= 1:
+        return items[0] if items else ""
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def system_capabilities_description() -> str:
+    """A plain-English description of what this system can answer, built
+    from entities.yaml + attributes.yaml — the message shown to a user
+    whose question was classified UNRELATED (see query_controller.py's
+    _handle_unrelated()). Generated, not a second hand-written copy of the
+    same entity/attribute list: a hardcoded copy here went stale the moment
+    a new entity type was added to entities.yaml but not to this string,
+    telling a user asking a legitimate question that the system couldn't
+    answer it."""
+    entity_labels = [spec["label_plural"] for spec in _ENTITIES.values() if spec.get("enabled", True)]
+    attr_labels: List[str] = []
+    seen = set()
+    for table in _ATTRIBUTE_TABLES:
+        for canonical, spec in table["columns"].items():
+            label = spec.get("label", canonical)
+            if label not in seen:
+                seen.add(label)
+                attr_labels.append(label)
+    return (
+        f"This system only answers questions about German {_joined(entity_labels)}: "
+        f"data ({_joined(attr_labels)}), geometry/shape, and spatial relationships "
+        f"or operations between them. Your question doesn't fit any of those "
+        f"categories."
+    )
 
 
 @dataclass
@@ -84,3 +170,9 @@ class QueryParams:
     classify_tokens: int = 0
     extract_tokens: int = 0
     extracted_data: Dict[str, Any] = field(default_factory=dict)
+    # The actual model each stage used for this request — QueryClassifier.model
+    # / QueryExtractor.model, which is CLASSIFY_MODEL/EXTRACT_MODEL (the env
+    # default) unless this request passed its own `model` override. Carried
+    # through so evaluation logging reports what really ran, not a guess.
+    classify_model: str = ""
+    extract_model: str = ""

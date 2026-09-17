@@ -1,0 +1,78 @@
+# Entity types — the named spatial things this system knows about.
+#
+# This is the set G of the specification (Section 2.2): "the named spatial
+# entities the system knows". G was always multi-type — states together with
+# cities — so adding a third type extends its membership without disturbing
+# the gap mathematics.
+#
+# `enumerable` carries the specification's Section 2.3 checks:
+#   true   a closed, listed set. A name outside it is a malformed query and no
+#          message is sent to the peer.
+#   false  open-ended. An unfamiliar name cannot be ruled out locally, so the
+#          request goes to the peer and the peer decides.
+#
+# `gazetteer_block` is the paragraph the stage-2 extraction prompts (see
+# config/prompts/*.yaml, which reference an entity type via its `gazetteer:`
+# list) show the model for this entity type. For an enumerable type, the
+# actual comma-joined name list is appended by agent2/pipeline/gazetteer.py's
+# get_names_block() — not stored here, since it comes from name_aliases.yaml
+# and would go stale if copied into this file too. For a non-enumerable type
+# the block is used exactly as written, with nothing appended.
+
+version: 1
+
+entities:
+
+  state:
+    enabled:         true
+    label:           "federal state"
+    label_plural:    "federal states"
+    table:           states
+    key_column:      state_name
+    id_column:       state_id
+    geometry_column: geo_shape
+    geometry_kind:   polygon          # point | linestring | polygon
+    enumerable:      true
+    gazetteer_block: >-
+      German states (any reasonable spelling/capitalization is fine — names
+      are normalized against the database automatically):
+
+  city:
+    enabled:         true
+    label:           "city"
+    label_plural:    "cities"
+    table:           cities
+    key_column:      city_name
+    id_column:       city_id
+    geometry_column: centroid
+    geometry_kind:   point
+    enumerable:      false
+    # Cities also carry plain numeric coordinates, which the distance resolver
+    # reads directly instead of going through PostGIS.
+    lat_column:      lat
+    lng_column:      lng
+    gazetteer_block: >-
+      City names: any reasonable spelling, capitalization, or
+      umlaut-vs-plain-vowel form is fine (e.g. München/Muenchen/Munich all
+      resolve the same way) — names are normalized against the database
+      automatically after extraction.
+
+  river:
+    enabled:         true
+    label:           "river"
+    label_plural:    "rivers"
+    table:           rivers
+    key_column:      river_name
+    id_column:       river_id
+    geometry_column: course
+    geometry_kind:   linestring
+    enumerable:      false
+    gazetteer_block: >-
+      River names: any reasonable spelling or English/German form is fine —
+      names are normalized against the database automatically after
+      extraction.
+
+# A name can belong to two entity types at once — Berlin, Hamburg and Bremen
+# are each both a city and a federal state. When a query names one without
+# saying which it means, resolve it to this type.
+ambiguous_name_default: state

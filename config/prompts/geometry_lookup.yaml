@@ -1,0 +1,114 @@
+# Stage-2 extraction prompt: GEOMETRY_LOOKUP.
+#
+# Prompt-specific content only — see config/prompts/direct_lookup.yaml for
+# the convention this follows (attribute data deferred to
+# config/schema/attributes.yaml; entity name blocks generated from the
+# gazetteer). This template carries no attributes at all, since a geometry
+# lookup returns shapes, not measured values.
+#
+# gazetteer: all (every enabled entity type in entities.yaml, not an
+# explicit [state, city] list) is correct here specifically because every
+# entity type declares its own geometry_column — unlike direct_lookup.yaml's
+# narrower `gazetteer: attributes` (not every entity has data to look up,
+# but every entity does have a shape) — so a new entity type appears here
+# with no prompt edit, the same "copy a block, no Python changes" promise
+# entities.yaml itself makes.
+#
+# entity_type_rules is a genuine YAML list rather than one folded paragraph,
+# since each bullet is an independent rule — a list loses nothing by being
+# read out one item at a time, unlike subject_rules in spatial_relationship.yaml.
+#
+# `sections` is the render order — see agent1/pipeline/prompt_loader.py for
+# how each name there is turned into prompt text and assembled with the
+# other prompt files' sections into the final system prompt sent to the model.
+
+version: 1
+
+query_type: GEOMETRY_LOOKUP
+
+sections: [intro, gazetteer, entity_type_rules, output_schema, output_notes, examples]
+
+gazetteer: all
+entity_type_rules_intro: "ENTITY TYPE RULES:"
+
+intro: 'You are extracting the details of a GEOMETRY_LOOKUP query for a geospatial statistics
+  database about German federal states, cities and rivers. Return ONLY valid JSON (no
+  markdown fences).'
+
+entity_type_rules:
+  - 'If the name is one of the 16 German federal states → entity_type = "state"'
+  - 'If the name is a river → entity_type = "river"'
+  - 'Otherwise, if the name is a city → entity_type = "city"'
+  - '"Berlin" is BOTH a city and a state. Default to entity_type = "state" unless the user
+    explicitly says "city of Berlin".'
+  - '"Hamburg" and "Bremen" are also both cities and states — same rule, default to "state".'
+
+output_schema: |-
+  {
+    "entities": [
+      {"entity_name": "München", "entity_type": "city"},
+      {"entity_name": "Bayern",  "entity_type": "state"}
+    ]
+  }
+
+output_notes: 'List every entity the query asks about. Do not include attributes or temporal fields.'
+
+examples:
+  - query: "What is the geometry of Munich city?"
+    output: {entities: [{entity_name: "München", entity_type: "city"}]}
+
+  - query: "Show me the boundary of Bayern state"
+    output: {entities: [{entity_name: "Bayern", entity_type: "state"}]}
+
+  - query: "What are the geometries of München and Bayern?"
+    output: {entities: [{entity_name: "München", entity_type: "city"}, {entity_name: "Bayern", entity_type: "state"}]}
+
+  - query: "Give me geometries for Berlin, Hamburg, Köln and Frankfurt"
+    output: {entities: [{entity_name: "Berlin", entity_type: "state"}, {entity_name: "Hamburg", entity_type: "state"}, {entity_name: "Köln", entity_type: "city"}, {entity_name: "Frankfurt", entity_type: "city"}]}
+
+  - query: "Show shapes of all German states"
+    output:
+      entities:
+        - {entity_name: "Baden-Württemberg", entity_type: "state"}
+        - {entity_name: "Bayern", entity_type: "state"}
+        - {entity_name: "Berlin", entity_type: "state"}
+        - {entity_name: "Brandenburg", entity_type: "state"}
+        - {entity_name: "Bremen", entity_type: "state"}
+        - {entity_name: "Hamburg", entity_type: "state"}
+        - {entity_name: "Hessen", entity_type: "state"}
+        - {entity_name: "Mecklenburg-Vorpommern", entity_type: "state"}
+        - {entity_name: "Niedersachsen", entity_type: "state"}
+        - {entity_name: "Nordrhein-Westfalen", entity_type: "state"}
+        - {entity_name: "Rheinland-Pfalz", entity_type: "state"}
+        - {entity_name: "Saarland", entity_type: "state"}
+        - {entity_name: "Sachsen", entity_type: "state"}
+        - {entity_name: "Sachsen-Anhalt", entity_type: "state"}
+        - {entity_name: "Schleswig-Holstein", entity_type: "state"}
+        - {entity_name: "Thüringen", entity_type: "state"}
+
+# Stage-3 examples for this category — the three shapes
+# agent1/retrieval/sql_generator.py's entity_exact_geometry()/entity_exists()/
+# entity_ilike_geometry() need to resolve one named entity (state or city)
+# to its own geometry: an exact match, an existence-only check (the row is
+# there but its shape is NULL — a different case from "not held at all"),
+# and a case-insensitive fallback. Each is generated once per entity_type
+# and reused for every future lookup of that shape — see SqlGenerator's
+# caching. Placeholder names are prescribed for exactly that reason: a
+# cached statement is reused with fresh values under the same names, never
+# regenerated. See config/prompts/sql_generation.yaml for the shared rules.
+sql_generation:
+  examples:
+    - request: "The WKT text and matched name of the federal state whose name exactly equals a given value, only if it has a non-null geometry. Use exactly :name for the name to match. Alias the WKT column exactly as wkt and the matched name column exactly as entity_name."
+      output:
+        sql: "SELECT ST_AsText(geo_shape) AS wkt, state_name AS entity_name FROM states WHERE state_name = :name AND geo_shape IS NOT NULL LIMIT 1"
+        params: {name: "Bayern"}
+
+    - request: "Whether this agent holds any row at all for the city whose name exactly equals a given value, regardless of whether its geometry is filled in. Use exactly :name for the name to match. Return one row aliased exactly as found if a row exists, no rows otherwise."
+      output:
+        sql: "SELECT 1 AS found FROM cities WHERE city_name = :name LIMIT 1"
+        params: {name: "München"}
+
+    - request: "The WKT text and matched name of the city whose name case-insensitively matches a given value, only if it has a non-null geometry. Use exactly :name for the value to match against. Alias the WKT column exactly as wkt and the matched name column exactly as entity_name."
+      output:
+        sql: "SELECT ST_AsText(centroid) AS wkt, city_name AS entity_name FROM cities WHERE city_name ILIKE :name AND centroid IS NOT NULL LIMIT 1"
+        params: {name: "münchen"}

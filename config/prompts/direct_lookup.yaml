@@ -1,0 +1,97 @@
+# Stage-2 extraction prompt: DIRECT_LOOKUP.
+#
+# This carries only what is genuinely specific to this prompt — the intro,
+# the temporal-array rule, the output shape, and worked examples. It does
+# NOT repeat the valid attribute list or their aliases ("married" ->
+# "marriages", etc.) — those already live once in config/schema/attributes.yaml
+# and get generated into the assembled prompt at build time, the same way
+# STATE_NAMES_BLOCK is generated from the gazetteer instead of being
+# hardcoded in each template.
+#
+# `gazetteer: attributes` and `attributes_entity: all` (rather than the
+# explicit [state]/state used elsewhere) are what make this category
+# multi-entity: a plain data query could be about any attribute-bearing
+# entity, not just states, so both render one block per entity type that
+# has its own table in attributes.yaml — see prompt_loader.py's
+# _render_gazetteer()/_render_attributes(). Deliberately narrower than
+# gazetteer.yaml's own "all" (every enabled entity type): an entity that
+# exists but has no attribute table (city, today) has nothing a data lookup
+# could ask for, so it stays out of this template's gazetteer even though
+# GEOMETRY_LOOKUP's own gazetteer does show it. Adding a new
+# attribute-bearing entity (e.g. a "river" table in attributes.yaml) needs
+# no edit here: it just starts appearing in both blocks, and in
+# VALID_ENTITY_TYPES.
+#
+# `sections` is the render order — see agent1/pipeline/prompt_loader.py for
+# how each name there is turned into prompt text and assembled with the
+# other prompt files' sections into the final system prompt sent to the model.
+
+version: 1
+
+query_type: DIRECT_LOOKUP
+
+sections: [intro, gazetteer, attributes, temporal_rules, output_schema, output_notes, examples]
+
+gazetteer: attributes
+attributes_entity: all
+
+intro: 'You are extracting the details of a DIRECT_LOOKUP query for a geospatial
+  statistics database. The query may be about any entity type listed below
+  (federal states, or any other entity type that has its own attributes
+  listed) — read which one from the attribute being asked for and the named
+  entity itself, not from an assumption that it is always a state. Return
+  ONLY valid JSON (no markdown fences).'
+
+temporal_rules: '"temporal" is always a JSON array of every individual year being asked
+  about, listed out in full — NOT a start/end pair. A range like "2019 to
+  2023" must be expanded into every year in that range:
+  [2019,2020,2021,2022,2023]. A single year is still a one-element array:
+  [2021]. If the query says "now", "current", "currently", "this year",
+  "today", or similar, use CURRENT_YEAR (given below) — that is an actual
+  year being asked about, not an assumption you are making. If the query
+  names no year at all and implies none, leave this field an empty array:
+  []. Never fill in a year the query did not ask about and did not imply —
+  an empty array is the correct, honest answer when nothing indicates one.'
+
+output_schema: |-
+  {
+    "spatial": ["Bayern"] or "all",
+    "temporal": [2021],
+    "attributes": ["population"],
+    "entity_type": "state"
+  }
+
+output_notes: '"spatial" is the named entity/entities, or "all" if none/every one of that
+  entity type is named. "attributes" lists every attribute the query asks for; if none is
+  named, still include "population" since a data lookup needs at least one attribute to
+  answer. "entity_type" is whichever entity type''s attribute list (given above) actually
+  contains what was asked for — go by the attribute and the named entity itself, not by
+  assumption; default to "state" only when the query gives no basis to tell (e.g. a bare
+  "all" with no other clue).'
+
+examples:
+  - query: "Give me population for all German states in 2021"
+    output: {spatial: "all", temporal: [2021], attributes: ["population"], entity_type: "state"}
+
+  - query: "Give me marriages and live_births for Bayern from 2019 to 2023"
+    output: {spatial: ["Bayern"], temporal: [2019, 2020, 2021, 2022, 2023], attributes: ["marriages", "live_births"], entity_type: "state"}
+
+  - query: "Give me married and live birth data for Berlin in 2020"
+    output: {spatial: ["Berlin"], temporal: [2020], attributes: ["marriages", "live_births"], entity_type: "state"}
+
+# Stage-3 examples for this same category — worked SQL for the two shapes
+# agent1/retrieval/sql_generator.py's partition_check()/demographics() ever
+# need for a DIRECT_LOOKUP: which of the requested entities exist here at
+# all, and the actual attribute values for the ones that do. See
+# config/prompts/sql_generation.yaml for the shared rules these follow.
+sql_generation:
+  examples:
+    - request: "Which of these federal state names does this agent hold at least one row for in the state attributes table, regardless of year or which attribute values are actually filled in: ['Bayern', 'Sachsen']. Return the distinct federal state names found, in a single column aliased exactly as entity_name."
+      output:
+        sql: "SELECT DISTINCT s.state_name AS entity_name FROM states s JOIN state_demographics sd ON sd.state_id = s.state_id WHERE s.state_name = ANY(:names)"
+        params: {names: ["Bayern", "Sachsen"]}
+
+    - request: "For federal states ['Bayern'] and years [2021], return population, marriages from the state attributes table, one row per federal state per year. Alias the state name column exactly as entity_name, the year column exactly as year, and each attribute column exactly by its own name (population, marriages) — no other aliases — in that exact column order: entity_name, year, then each attribute in the order listed. Order the rows by state name then year."
+      output:
+        sql: "SELECT s.state_name AS entity_name, sd.stat_year AS year, sd.population AS population, sd.marriages AS marriages FROM state_demographics sd JOIN states s ON s.state_id = sd.state_id WHERE s.state_name = ANY(:names) AND sd.stat_year = ANY(:years) ORDER BY s.state_name, sd.stat_year"
+        params: {names: ["Bayern"], years: [2021]}

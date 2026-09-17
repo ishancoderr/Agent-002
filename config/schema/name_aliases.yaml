@@ -1,0 +1,52 @@
+# Canonical name/alias gazetteer data — the single source of truth for German
+# state and city name spellings used across the extraction prompts, and for
+# cleaning whatever the LLM extracts to match what is actually stored in the
+# database. Mirrors Agent-1's own config/schema/name_aliases.yaml structure —
+# see that file's comments for the full rationale.
+#
+# `state` is a flat list: state names are always spelled the way the database
+# stores them, so no alias mapping is needed beyond the case/diacritic/
+# hyphenation folding gazetteer.py's _normalize_key() already does.
+#
+# `city` only needs an entry when there's an alias worth recording — verified
+# against Agent-2's own `cities.city_name` column, which stores the same
+# English-form spellings as Agent-1's (Munich, Cologne, Nuremberg,
+# Düsseldorf kept in its German umlaut spelling).
+#
+# `river` follows the same rule. Agent-2 holds a different set of rivers from
+# Agent-1's own partition (Rhein/Elbe/Donau/Main/Mosel) — this agent's own
+# river_measurements rows are for Weser/Neckar/Spree/Saale/Ems — so a river
+# query naming one of Agent-1's rivers is a genuine gap here, and vice versa,
+# exercising the real missing-data KQML exchange rather than every river
+# being trivially local to both agents.
+
+state:
+  - Baden-Württemberg
+  - Bayern
+  - Berlin
+  - Brandenburg
+  - Bremen
+  - Hamburg
+  - Hessen
+  - Mecklenburg-Vorpommern
+  - Niedersachsen
+  - Nordrhein-Westfalen
+  - Rheinland-Pfalz
+  - Saarland
+  - Sachsen
+  - Sachsen-Anhalt
+  - Schleswig-Holstein
+  - Thüringen
+
+city:
+  Munich:     [münchen, muenchen, munich]
+  Cologne:    [köln, koeln, cologne]
+  Nuremberg:  [nürnberg, nuernberg, nuremberg]
+  Düsseldorf: [dusseldrof]   # common transposition typo, not a real spelling variant
+
+river:
+  Weser: []
+  Neckar: []
+  Spree: []
+  Saale: []
+  Ems: []
