@@ -34,17 +34,15 @@ attribute_tables:
         type:    integer
         aliases: [births, "live birth", live_birth]
 
-  - table:         river_measurements
-    entity:        river
-    join_column:   river_id
-    period_column: measure_year
-    columns:
-      length_km:
-        label:   "length"
-        type:    float
-        unit:    "km"
-        aliases: [length, "length in km", "how long"]
-
+# ── Adding an attribute table ────────────────────────────────────────────────
+#
+#   - table:         river_measurements
+#     entity:        river              # must exist and be enabled in entities.yaml
+#     join_column:   river_id
+#     period_column: measure_year
+#     columns:
+#       discharge: {label: "discharge", type: float, unit: "m3/s"}
+#
 # ── Attributes with no year ──────────────────────────────────────────────────
 #
 #   - table:         road_facts

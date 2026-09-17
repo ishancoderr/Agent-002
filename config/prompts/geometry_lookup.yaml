@@ -32,13 +32,11 @@ gazetteer: all
 entity_type_rules_intro: "ENTITY TYPE RULES:"
 
 intro: 'You are extracting the details of a GEOMETRY_LOOKUP query for a geospatial statistics
-  database about German federal states, cities and rivers. Return ONLY valid JSON (no
-  markdown fences).'
+  database about German federal states. Return ONLY valid JSON (no markdown fences).'
 
 entity_type_rules:
   - 'If the name is one of the 16 German federal states → entity_type = "state"'
-  - 'If the name is a river → entity_type = "river"'
-  - 'Otherwise, if the name is a city → entity_type = "city"'
+  - 'If the name is a city → entity_type = "city"'
   - '"Berlin" is BOTH a city and a state. Default to entity_type = "state" unless the user
     explicitly says "city of Berlin".'
   - '"Hamburg" and "Bremen" are also both cities and states — same rule, default to "state".'

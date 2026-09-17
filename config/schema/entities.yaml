@@ -57,22 +57,28 @@ entities:
       resolve the same way) — names are normalized against the database
       automatically after extraction.
 
-  river:
-    enabled:         true
-    label:           "river"
-    label_plural:    "rivers"
-    table:           rivers
-    key_column:      river_name
-    id_column:       river_id
-    geometry_column: course
-    geometry_kind:   linestring
-    enumerable:      false
-    gazetteer_block: >-
-      River names: any reasonable spelling or English/German form is fine —
-      names are normalized against the database automatically after
-      extraction.
-
 # A name can belong to two entity types at once — Berlin, Hamburg and Bremen
 # are each both a city and a federal state. When a query names one without
 # saying which it means, resolve it to this type.
 ambiguous_name_default: state
+
+# ── Adding an entity type ────────────────────────────────────────────────────
+# Copy a block, point it at your table, restart. No Python changes.
+#
+#   river:
+#     enabled:         true
+#     label:           "river"
+#     label_plural:    "rivers"
+#     table:           rivers
+#     key_column:      river_name
+#     id_column:       river_id
+#     geometry_column: course
+#     geometry_kind:   linestring
+#     enumerable:      false
+#
+# What a linestring implies: relationships needing only a geometry — touches,
+# north of, within distance — work unchanged. The four constructive operations
+# still run, but the argument that produced exactly four of them (Section 3.3)
+# is an argument about areas; intersecting two rivers yields points, not an
+# area. The response reports the result's real geometry_type either way, so
+# the answer stays honest about what it actually is.

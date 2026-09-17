@@ -12,13 +12,6 @@
 # against Agent-2's own `cities.city_name` column, which stores the same
 # English-form spellings as Agent-1's (Munich, Cologne, Nuremberg,
 # Düsseldorf kept in its German umlaut spelling).
-#
-# `river` follows the same rule. Agent-2 holds a different set of rivers from
-# Agent-1's own partition (Rhein/Elbe/Donau/Main/Mosel) — this agent's own
-# river_measurements rows are for Weser/Neckar/Spree/Saale/Ems — so a river
-# query naming one of Agent-1's rivers is a genuine gap here, and vice versa,
-# exercising the real missing-data KQML exchange rather than every river
-# being trivially local to both agents.
 
 state:
   - Baden-Württemberg
@@ -43,10 +36,3 @@ city:
   Cologne:    [köln, koeln, cologne]
   Nuremberg:  [nürnberg, nuernberg, nuremberg]
   Düsseldorf: [dusseldrof]   # common transposition typo, not a real spelling variant
-
-river:
-  Weser: []
-  Neckar: []
-  Spree: []
-  Saale: []
-  Ems: []
